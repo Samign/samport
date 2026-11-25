@@ -75,8 +75,9 @@ powershell -ExecutionPolicy Bypass -File scripts\debug.ps1 -Game "<your game fol
 | `-NamedWrites` / `VICTORY_MEMORY_WRITES=named` | experimental: a shader that uses raw addresses declares written only the memory its dispatch names, not every copy; with the builder on, snapshots of every copy cost ~1.9 s a frame. Stores through pointers read out of memory into unnamed copies are then not copied back |
 | `-NoQuarantine` | builder output reaches game memory. **Do not use yet**: with `-FirstLaneLocal` the game crashed within seconds, reading float infinities as pointers |
 | `-WaveWhy` / `VICTORY_WAVE_WHY=1` | prints why each 64-lane retry fails (`WAVE64-RETRY`); part of the shader cache key |
+| overlap / `VICTORY_RELAY=2` | **default in `play.ps1` (`-Relay 0` off) and `debug.ps1` (`-NoFast` off)**: the card runs a submission while the CPU prepares the next |
 | `-InPlace 1` / `VICTORY_INPLACE=1` | **default in `play.ps1` and `debug.ps1`** (`-InPlace 0` turns it off). Zero-copy (in the code upstream, off by default there): game memory outside buffers is opened as a host heap the card reads directly, instead of being copied (~6.4 GB of copies in a builder run). Locks up to `VICTORY_INPLACE_MB` (4096) of it into RAM. A `title memory in place` line every 10 s says what was placed and what was turned down |
-| `-InPlace 2` | also the game's buffers (not the big ones in card memory). Not with `-Fast`/late wait |
+| `-InPlace 2` | also the game's buffers (not the big ones in card memory). Turns overlap off (not compatible with late wait) |
 | `-InPlaceProbe` / `VICTORY_INPLACE_PROBE=1` | asks the driver what it accepts in place; logs `in place probe` lines |
 | `-GpuTiming` / `VICTORY_GPU_TIMING=1 VICTORY_D3D12_DRED=1` | times every command on the card and ranks them by pipeline (`the card's time by command`); runs slower |
 | `-BarrierTest indirect` / `VICTORY_BARRIER_TEST` | timing only: leaves out GPU waits (`indirect`, `groups`, `both`) to measure what they cost; may glitch |
@@ -117,6 +118,13 @@ or a view that could not be mapped or committed).
 - `-BarrierTest indirect` left GPU time unchanged (~289 ms): the waits are not the cost.
   The ~6,400 indirect commands themselves take ~147 ms (~23 us each), and the card is idle
   ~210 ms a frame waiting on the CPU, which `-Fast` (overlap) targets.
+- Overlap (`VICTORY_RELAY=2`) with `-InPlace 1`: ~310-380 ms a frame (2.6-3.2 fps), card ~82%
+  busy, GPU ~196 ms. Now the default.
+- Of the four heaviest compute shaders, `f22a76fcb967ee59` (~3,900 instructions) and
+  `3592426e3e9142d8` (~7,700) use `image_bvh64_intersect_ray` and raw-address loads: they are
+  the game's ray-traversal programs walking the prebuilt structures, already running without
+  the builder. `cfd83392ec9ae408` (250 instructions) and `cb6adcc6da2613ff` (~760) are plain
+  compute; why the small one takes ~16 ms is not known yet.
 - Shaders saved with `VICTORY_SHADER_SAVE=<dir>` for study must stay outside
   the repository (docs/asset-policy.md).
 

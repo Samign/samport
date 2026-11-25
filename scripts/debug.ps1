@@ -12,11 +12,11 @@
 #   ... -Builder -FirstLaneLocal -NoQuarantine   # DO NOT USE yet: crashed the game (builder output landed on game pointers)
 #   ... -Builder -FirstLaneLocal -NamedWrites    # experimental: snapshot only memory a dispatch names (much less CPU work)
 #   ... -InPlace 0                     # turn off zero-copy (on by default: memory outside buffers is shared with the card, not copied)
-#   ... -InPlace 2                     # also the game's buffers (not with -Fast)
+#   ... -InPlace 2                     # also the game's buffers (turns -Fast off)
 #   ... -InPlaceProbe                  # ask the driver what in-place memory it accepts (logs "in place probe")
 #   ... -GpuTiming                     # rank GPU time by pipeline ("the card's time by command"); frames get slower
 #   ... -GpuTiming -BarrierTest indirect   # TIMING ONLY: how much the ~12,000 GPU waits around indirect commands cost
-#   ... -Fast                          # VICTORY_RELAY=2: the card works while the CPU prepares the next submission
+#   ... -NoFast                        # turn off overlap (on by default: VICTORY_RELAY=2, the card works while the CPU prepares)
 #   ... -SaveShaders "$env:TEMP\ztrx-shaders"   # keep the game's shaders for study (never inside the repo)
 #   ... -Builder -WaveWhy -WaveWide    # same, plus the risky two-host-wave form (can hang the GPU)
 param(
@@ -31,7 +31,8 @@ param(
     [switch]$Builder,
     [switch]$WaveWhy,
     [switch]$WaveWide,
-    [switch]$Fast,
+    [switch]$Fast,                                    # kept for old command lines: overlap is on by default
+    [switch]$NoFast,
     [switch]$FirstLaneLocal,
     [switch]$NoQuarantine,
     [switch]$NamedWrites,
@@ -43,6 +44,10 @@ param(
     [string]$SaveShaders = ""                         # folder OUTSIDE the repo: each shader as given (.cdxil) and translated (.dxil)
 )
 
+# Overlap (VICTORY_RELAY=2) is on by default; -InPlace 2 and -GpuTiming turn it off.
+$explicitFast = $PSBoundParameters.ContainsKey('Fast')
+if ($InPlace -ge 2 -and $explicitFast) { Write-Host "-InPlace 2 cannot be combined with -Fast / VICTORY_LATE_WAIT" -ForegroundColor Red; exit 1 }
+$Fast = -not $NoFast -and $InPlace -lt 2 -and -not $GpuTiming
 foreach ($v in "VICTORY_KEYS", "VICTORY_CAPTURE", "VICTORY_CAPTURE_FRAMES", "VICTORY_DUMP_TARGETS",
                "VICTORY_BVH_BUILDER", "VICTORY_BVH_QUARANTINE", "VICTORY_RELAY", "VICTORY_LATE_WAIT",
                "VICTORY_WIDE_BACK", "VICTORY_TEXTURE_PCT", "VICTORY_TEXTURE_BUDGET_MB",
@@ -68,8 +73,8 @@ if ($GpuTiming) {
     # Each list runs and is timed on its own (slower overall); DRED notes each command's pipeline.
     $env:VICTORY_GPU_TIMING = "1"; $env:VICTORY_D3D12_DRED = "1"
 }
-if ($Fast -and $GpuTiming) {
-    Write-Host "Note: -GpuTiming turns off late wait, so -Fast has no effect in a timing run." -ForegroundColor Yellow
+if ($GpuTiming) {
+    Write-Host "Note: a -GpuTiming run has no overlap (late wait is off), so frames are slower." -ForegroundColor Yellow
 }
 if ($SaveShaders) {
     $full = [System.IO.Path]::GetFullPath($SaveShaders)

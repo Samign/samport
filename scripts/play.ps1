@@ -4,7 +4,8 @@ param(
     [string]$Cache = "$env:LOCALAPPDATA\ztrx\cache",
     [string]$Data = "$env:LOCALAPPDATA\ztrx\data",
     [string]$Exe = "",
-    [int]$InPlace = 1   # zero-copy for memory outside buffers (VICTORY_INPLACE); 0 turns it off
+    [int]$InPlace = 1,  # zero-copy for memory outside buffers (VICTORY_INPLACE); 0 turns it off
+    [int]$Relay = 2     # overlap: the card works while the CPU prepares (VICTORY_RELAY); 0 turns it off
 )
 foreach ($v in "VICTORY_KEYS", "VICTORY_CAPTURE", "VICTORY_CAPTURE_FRAMES", "VICTORY_DUMP_TARGETS") {
     Remove-Item "Env:$v" -ErrorAction SilentlyContinue
@@ -18,6 +19,7 @@ if (-not (Test-Path $Exe -PathType Leaf)) {
 }
 New-Item -ItemType Directory -Force $Cache, $Data | Out-Null
 if ($InPlace -gt 0) { $env:VICTORY_INPLACE = "$InPlace" } else { Remove-Item Env:VICTORY_INPLACE -ErrorAction SilentlyContinue }
+if ($Relay -gt 0 -and $InPlace -lt 2) { $env:VICTORY_RELAY = "$Relay" } else { Remove-Item Env:VICTORY_RELAY -ErrorAction SilentlyContinue }
 $env:VICTORY_CACHE_DIR = $Cache
 $env:VICTORY_DATA_DIR = $Data
 & $Exe run $Game --execute 2>&1 | Out-File "$env:TEMP\ztrx.log" -Encoding utf8
