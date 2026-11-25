@@ -1371,6 +1371,15 @@ pub(crate) fn room() -> bool {
         let mb = std::env::var("VICTORY_TEXTURE_BUDGET_MB").ok()?;
         mb.trim().parse::<u64>().ok().map(|mb| mb << 20)
     });
+    // `VICTORY_TEXTURE_PCT` (50..=98, default 90): the share of the card's budget
+    // this process may use before more texture copies wait.
+    static PCT: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    let pct = *PCT.get_or_init(|| {
+        std::env::var("VICTORY_TEXTURE_PCT")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .map_or(90, |p| p.clamp(50, 98))
+    });
     let filled = KINDS[1].load(Relaxed);
     if let Some(limit) = limit {
         return filled < limit;
@@ -1379,7 +1388,25 @@ pub(crate) fn room() -> bool {
         return true;
     }
     match crate::host::host().and_then(|h| h.video_memory()) {
-        Some([budget, used, ..]) => used < budget / 10 * 9,
+        Some([budget, used, ..]) => {
+            let ok = used < budget / 100 * pct;
+            // One line every 5 s: what the card has, what this process uses, and
+            // how much of that is texture copies the title fills.
+            static LAST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let now = crate::host::now_ms();
+            if now.saturating_sub(LAST.load(Relaxed)) > 5000 {
+                LAST.store(now, Relaxed);
+                tracing::info!(
+                    budget_mb = budget >> 20,
+                    used_mb = used >> 20,
+                    texture_copies_mb = filled >> 20,
+                    pct,
+                    room = ok,
+                    "card memory for texture copies"
+                );
+            }
+            ok
+        }
         None => filled < WITHOUT_BUDGET,
     }
 }
