@@ -165,7 +165,7 @@ $patterns = @(
     "builder", "host pipeline refused", "host mesh pipeline", "WAVE64-RETRY",
     "converter shader", "dropped .* without a host pipeline: ", "library saved",
     "ms/frame", "textures picked by index", "device removed", "ERROR",
-    "first-chance exception", "only approximately", "turned off for the rest", "buffer view that is not there", "structure builder stage", "unhandled exception",
+    "first-chance exception", "only approximately", "turned off for the rest", "buffer view that is not there", "structure builder stage", "unhandled exception", "translated in another form",
     "program without a host pipeline", "MESH-COUNTS", "indirect mesh draws per frame", "merged indirect mesh draws", "record assembler", "merged mesh command signature", "indirect mesh draws reading the next record", "in place", "copystat: memory: ", "display mode reported", "depth texture with", "swap chain",  "time by command", "the card's clock", "dstorage", "black frame", "enables the", "buffer view", "constant buffer not", "does not translate"
 ) -join "|"
 Select-String -Path $Log -Pattern $patterns |

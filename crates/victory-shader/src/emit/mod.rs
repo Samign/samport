@@ -301,6 +301,22 @@ thread_local! {
     /// How the last translation on this thread is approximate, if it is
     /// ([`take_approximate`]).
     static APPROXIMATE: std::cell::Cell<Option<&'static str>> = const { std::cell::Cell::new(None) };
+    /// The form the last wave64 retry on this thread was made in ([`take_form`]), and the
+    /// form of the last attempt reported.
+    static FORM: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+    static LAST_TRY: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+}
+
+/// The form a console wave64 compute program translated last on this thread was made in,
+/// when not as given (`without skips`, `local waves (idiom)`, ...): which of the retries
+/// of [`emit`] made it.
+pub fn take_form() -> Option<String> {
+    FORM.with(|f| f.borrow_mut().take())
+}
+
+fn keep_form() {
+    let last = LAST_TRY.with(|l| l.borrow_mut().take());
+    FORM.with(|f| *f.borrow_mut() = last);
 }
 
 /// How the translation this thread made last is only approximate, if it is:
@@ -331,6 +347,8 @@ pub fn emit(
     res: &resource::Resources,
 ) -> Result<HostShader, ShaderError> {
     APPROXIMATE.with(|a| a.set(None));
+    FORM.with(|f| *f.borrow_mut() = None);
+    LAST_TRY.with(|l| *l.borrow_mut() = None);
     // (what an earlier program's lowering on this thread left behind)
     lower::take_needs();
     let original = emit_program(c, native, p, st, io, res);
@@ -350,6 +368,7 @@ pub fn emit(
     if stuck && native.stage == HwStage::Cs && native.wave64 && lower::host_max_wave() == 32 {
         let why = std::env::var_os("VICTORY_WAVE_WHY").is_some();
         let report = |what: &str, r: &Result<(HostShader, Option<u32>), ShaderError>| {
+            LAST_TRY.with(|l| *l.borrow_mut() = Some(what.to_owned()));
             if why {
                 match r {
                     Ok((_, wave)) => eprintln!("WAVE64-RETRY {what}: wave {wave:?}"),
@@ -395,6 +414,7 @@ pub fn emit(
                 let again = emit_program(c, native, p, st, io, res);
                 report(name, &again);
                 if done(&again) {
+                    keep_form();
                     return again.map(|(shader, _)| shader);
                 }
             }
@@ -420,7 +440,8 @@ pub fn emit(
                     let again = emit_program(c, native, p, st, io, res);
                     report("without skips, scalars followed", &again);
                     if done(&again) {
-                        return again.map(|(shader, _)| shader);
+                        keep_form();
+                    return again.map(|(shader, _)| shader);
                     }
                 }
                 // Still stopped where not every lane runs: the per-lane branches around
@@ -437,7 +458,8 @@ pub fn emit(
                         let again = widen(c, native, base, why);
                         report("wave-wide branches", &again);
                         if done(&again) {
-                            return again.map(|(shader, _)| shader);
+                            keep_form();
+                    return again.map(|(shader, _)| shader);
                         }
                     }
                 }
@@ -458,7 +480,8 @@ pub fn emit(
                         if !exact {
                             note_approximate("each host half-wave as a wave of its own");
                         }
-                        return local.map(|(shader, _)| shader);
+                        keep_form();
+                    return local.map(|(shader, _)| shader);
                     }
                 }
             }
@@ -469,6 +492,7 @@ pub fn emit(
                     if !exact {
                         note_approximate("each host half-wave as a wave of its own");
                     }
+                    keep_form();
                     return local.map(|(shader, _)| shader);
                 }
             }
@@ -482,7 +506,8 @@ pub fn emit(
                         report(&format!("local waves (APPROXIMATE, any mask), {name}"), &local);
                         if done(&local) {
                             note_approximate("every lane mask and lane read per host half-wave");
-                            return local.map(|(shader, _)| shader);
+                            keep_form();
+                    return local.map(|(shader, _)| shader);
                         }
                     }
                 }
@@ -490,6 +515,7 @@ pub fn emit(
                 report("local waves (APPROXIMATE, any mask)", &local);
                 if done(&local) {
                     note_approximate("every lane mask and lane read per host half-wave");
+                    keep_form();
                     return local.map(|(shader, _)| shader);
                 }
             }

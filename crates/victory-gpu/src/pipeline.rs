@@ -139,6 +139,10 @@ impl Shader {
         self.translated
             .get_or_init(|| {
                 let done = translate(&self.container);
+                // (with the shader cache, only when translated: `-WaveWhy` keys a cold one)
+                if let Some(form) = victory_shader::emit::take_form() {
+                    tracing::info!(hash = %self.hash, %form, "wave64 program translated in another form");
+                }
                 // `VICTORY_SHADER_SAVE=<dir>`: each shader as the title gave it (`.cdxil`) and as
                 // translated (`.dxil`), by the hash crash reports name it with
                 if let Some(dir) = std::env::var_os("VICTORY_SHADER_SAVE") {
