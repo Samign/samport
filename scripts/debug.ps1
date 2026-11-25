@@ -17,6 +17,7 @@
 #   ... -GpuTiming                     # rank GPU time by pipeline ("the card's time by command"); frames get slower
 #   ... -GpuTiming -BarrierTest indirect   # TIMING ONLY: how much the ~12,000 GPU waits around indirect commands cost
 #   ... -CardBuffersMinMB 16           # the layer's own default (the script uses 1: the card compares buffers of 1 MiB+, up to 512 MB)
+#   ... -Console series-s              # the game believes it runs on a Series S: lower resolution, textures and memory budgets
 #   ... -DisplayMode 2560x1440         # the default reports a 1080p TV (less GPU work and VRAM); 3840x2160 is the layer's own
 #   ... -TextureIdleMS 1000 -TexturePct 95   # free unused texture copies sooner and let textures use more of the card
 #   ... -NoIndirectWindow              # one clamp pass per indirect draw again (the window, on by default, clamps up to 64 at once)
@@ -43,6 +44,7 @@ param(
     [switch]$IndirectWindow,                          # kept for old command lines: the window is on by default
     [switch]$NoIndirectWindow,
     [int]$TextureIdleMS = 1000,                       # unused texture copies leave the card after 1 s (layer default 5000)
+    [ValidateSet("series-x", "series-s")][string]$Console = "series-x",   # the Xbox model the game sees; series-s picks its lighter settings
     [string]$DisplayMode = "1920x1080",               # VICTORY_DISPLAY_MODE: the TV size the console reports (layer default 3840x2160)                          # VICTORY_TEXTURE_IDLE_MS: free unused texture copies after this long (layer default 5000)                        # VICTORY_INDIRECT_WINDOW off
     [switch]$FirstLaneLocal,
     [switch]$NoQuarantine,
@@ -129,11 +131,11 @@ if (-not $found) {
 }
 $Exe = (Resolve-Path $found).Path
 Write-Host "exe: $Exe`ncache: $Cache`nlog: $Log"
-Write-Host "builder=$([bool]$Builder) quarantine=$([bool]($Builder -and -not $NoQuarantine)) firstlane=$([bool]$FirstLaneLocal) namedwrites=$([bool]$NamedWrites) inplace=$InPlace gputiming=$([bool]$GpuTiming) barriertest=$BarrierTest wavewhy=$([bool]$WaveWhy) wavewide=$([bool]$WaveWide) fast=$([bool]$Fast) wideback=$(-not $NoWideBack) cardmin=$CardBuffersMinMB indirectwindow=$(-not $NoIndirectWindow) cardmb=$CardBuffersMB texidle=$TextureIdleMS display=$DisplayMode texpct=$TexturePct texbudget=$TextureBudgetMB"
+Write-Host "builder=$([bool]$Builder) quarantine=$([bool]($Builder -and -not $NoQuarantine)) firstlane=$([bool]$FirstLaneLocal) namedwrites=$([bool]$NamedWrites) inplace=$InPlace gputiming=$([bool]$GpuTiming) barriertest=$BarrierTest wavewhy=$([bool]$WaveWhy) wavewide=$([bool]$WaveWide) fast=$([bool]$Fast) wideback=$(-not $NoWideBack) cardmin=$CardBuffersMinMB indirectwindow=$(-not $NoIndirectWindow) cardmb=$CardBuffersMB texidle=$TextureIdleMS display=$DisplayMode console=$Console texpct=$TexturePct texbudget=$TextureBudgetMB"
 
 # (A first "NativeCommandError" line in the log is only PowerShell wrapping stderr; harmless.)
 $env:NO_COLOR = "1"
-& $Exe run $Game --execute 2>&1 | ForEach-Object { "$_" } | Tee-Object -FilePath $Log
+& $Exe run $Game --execute --console $Console 2>&1 | ForEach-Object { "$_" } | Tee-Object -FilePath $Log
 
 $summary = $Log -replace '\.log$', '-summary.txt'
 $patterns = @(

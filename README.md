@@ -87,6 +87,7 @@ powershell -ExecutionPolicy Bypass -File scripts\debug.ps1 -Game "<your game fol
 | `-SaveShaders <dir>` / `VICTORY_SHADER_SAVE` | saves each shader as given and as translated, by hash; the folder must be outside the repository |
 | `-TextureIdleMS N` / `VICTORY_TEXTURE_IDLE_MS` | **1000 in both scripts**: how long an unused texture copy is kept on the card (default 5000, at least 250): shorter frees VRAM for textures still waiting |
 | `-DisplayMode 1920x1080` / `VICTORY_DISPLAY_MODE` | **default in both scripts** (`-DisplayMode 3840x2160` for the layer's own): the TV size the console reports (layer default 3840x2160). If the game renders for the mode it is given, smaller means less GPU work and smaller render targets |
+| `-Console series-s` | the game believes it runs on an Xbox Series S (`--console series-s`), which it uses to pick lower resolution, textures and memory budgets (about 7.8 GB of title memory instead of 13.5 GB) |
 | `VICTORY_CARD_BUFFERS_MB=0` | keeps the game's large buffers out of card memory (more room for textures, likely slower) |
 
 A failed DirectStorage write into physical pages now says why (an unknown page,
@@ -150,6 +151,9 @@ or a view that could not be mapped or committed).
 - `-DisplayMode 1920x1080` (now default with the above): **~196-208 ms a frame (4.8-5.1 fps)**,
   GPU ~131 ms, looks better. Host textures only fell ~5.3 -> ~5.2 GB, so the game's render
   targets barely shrank: it may follow the mode only in part.
+- GPU timing at these defaults: ~182 ms of commands a frame, no single hot spot: ~6,300
+  indirect mesh draws take ~126 ms (20-30 us each), the heaviest compute dispatch ~8 ms. The
+  ray-traversal programs were not among the top in this scene.
 - Shaders saved with `VICTORY_SHADER_SAVE=<dir>` for study must stay outside
   the repository (docs/asset-policy.md).
 

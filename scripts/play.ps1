@@ -11,7 +11,8 @@ param(
     [int]$CardBuffersMB = 1024,    # most card memory for those copies (layer default 512; 1024 is faster, costs VRAM)
     [int]$IndirectWindow = 1,      # clamp up to 64 indirect mesh records in one pass (VICTORY_INDIRECT_WINDOW); 0 off
     [int]$TextureIdleMS = 1000,    # unused texture copies leave the card after this long (VICTORY_TEXTURE_IDLE_MS)
-    [string]$DisplayMode = "1920x1080"  # the TV size the console reports (VICTORY_DISPLAY_MODE; layer default 3840x2160)
+    [string]$DisplayMode = "1920x1080", # the TV size the console reports (VICTORY_DISPLAY_MODE; layer default 3840x2160)
+    [ValidateSet("series-x", "series-s")][string]$Console = "series-x"  # the Xbox model the game sees
 )
 foreach ($v in "VICTORY_KEYS", "VICTORY_CAPTURE", "VICTORY_CAPTURE_FRAMES", "VICTORY_DUMP_TARGETS") {
     Remove-Item "Env:$v" -ErrorAction SilentlyContinue
@@ -34,5 +35,5 @@ $env:VICTORY_TEXTURE_IDLE_MS = "$TextureIdleMS"
 if ($DisplayMode) { $env:VICTORY_DISPLAY_MODE = $DisplayMode } else { Remove-Item Env:VICTORY_DISPLAY_MODE -ErrorAction SilentlyContinue }
 $env:VICTORY_CACHE_DIR = $Cache
 $env:VICTORY_DATA_DIR = $Data
-& $Exe run $Game --execute 2>&1 | Out-File "$env:TEMP\ztrx.log" -Encoding utf8
+& $Exe run $Game --execute --console $Console 2>&1 | Out-File "$env:TEMP\ztrx.log" -Encoding utf8
 Write-Host "Exited with $LASTEXITCODE; log: $env:TEMP\ztrx.log"
