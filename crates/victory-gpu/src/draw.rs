@@ -80,6 +80,15 @@ thread_local! {
 /// its stores from address 0, and the stages after it read what it never
 /// wrote; with the builder out of quarantine the title then read pointers
 /// of 0xffffffffffffffff (the crash of the run after the approximate check).
+/// `VICTORY_BVH_DRY=1`: the builder's stages are bound (their memory made
+/// ready, copied and declared written as for a real run) but not run. A
+/// check: a crash with it comes from what binding them does, not from what
+/// they store.
+fn builder_dry() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("VICTORY_BVH_DRY").is_some_and(|v| v == "1"))
+}
+
 fn builder_null_views() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var_os("VICTORY_BVH_NULL_VIEWS").is_some_and(|v| v == "1"))
@@ -1880,6 +1889,9 @@ impl State {
             crate::pipeline::builder_off("one of its stages takes the address of a buffer view that is not there");
             return;
         }
+        if builder_dry() && crate::pipeline::is_builder(self.pipeline as This) {
+            return;
+        }
         #[cfg(feature = "diagnostics")]
         list.note_op(|| self.op_text(format!("dispatch {x}x{y}x{z}"), true));
         // SAFETY: an open list with everything set.
@@ -2735,6 +2747,10 @@ impl State {
             };
             note_mergeable(strict, loose);
             self.last_mesh = Some(now);
+        }
+        if kind == DISPATCH && builder_dry() && crate::pipeline::is_builder(self.pipeline as This) {
+            crate::indirect::done(list, &bounded);
+            return true;
         }
         if kind == MESH {
             self.mesh_scissor(list, true);
