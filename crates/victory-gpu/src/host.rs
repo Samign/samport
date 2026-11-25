@@ -740,6 +740,9 @@ pub(crate) struct HostList {
     /// Device-local scratch buffer for clamped indirect arguments (`indirect`),
     /// grown to the largest indirect execution recorded on the list.
     indirect_args: Mutex<Option<(ID3D12Resource, u64)>>,
+    /// Device-local buffer for merged indirect records (`draw`'s mesh
+    /// merging), its size, and the bytes handed out since the list's reset.
+    merge_args: Mutex<(Option<(ID3D12Resource, u64)>, u64)>,
     /// Counts the list in [`ALIVE`] while it lives.
     _alive: Counted,
     /// The texts of the markers `note_op` set, in order (for device-removed
@@ -2834,6 +2837,7 @@ impl Host {
                 pipelines: Mutex::default(),
                 budget: OnceLock::new(),
                 indirect_args: Mutex::default(),
+                merge_args: Mutex::default(),
                 _alive: Counted::new(),
                 #[cfg(feature = "diagnostics")]
                 notes: Mutex::default(),
@@ -4435,6 +4439,8 @@ impl HostList {
         self.pipelines.lock().unwrap_or_else(|e| e.into_inner()).clear();
         #[cfg(feature = "diagnostics")]
         self.notes.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        // Every submission of the list has run: its merged records are read.
+        self.merge_args.lock().unwrap_or_else(|e| e.into_inner()).1 = 0;
         {
             let mut scratch = self.scratch.lock().unwrap_or_else(|e| e.into_inner());
             (scratch.current, scratch.used) = (0, 0);
@@ -5036,6 +5042,30 @@ impl HostList {
             self.keep(&old_buf);
         }
         Some(buffer)
+    }
+
+    /// `len` bytes of a device-local, shader-writable buffer for merged
+    /// indirect records, apart from every other range handed out since the
+    /// list's reset: the buffer and the range's offset (256-byte aligned).
+    /// The buffer starts in the common state, and the caller leaves it there.
+    pub(crate) fn merge_args(&self, len: u64) -> Option<(ID3D12Resource, u64)> {
+        let len = len.max(1).next_multiple_of(256);
+        let mut slot = self.merge_args.lock().unwrap_or_else(|e| e.into_inner());
+        let (buffer, at) = &mut *slot;
+        if buffer.as_ref().is_none_or(|(_, cap)| *at + len > *cap) {
+            let cap = buffer.as_ref().map_or(0, |(_, cap)| *cap);
+            let alloc = cap.saturating_mul(2).max(len).max(1 << 20).next_multiple_of(64 << 10);
+            let made = host()?.uav_buffer(alloc)?;
+            name(&made, || format!("merged indirect records {alloc:#x}"));
+            if let Some((old, _)) = buffer.replace((made, alloc)) {
+                // Ranges of it may still be read by this list's commands.
+                self.keep(&old);
+            }
+            *at = 0;
+        }
+        let offset = *at;
+        *at += len;
+        buffer.as_ref().map(|(b, _)| (b.clone(), offset))
     }
 
     /// Keeps `object` alive until the list is reset.

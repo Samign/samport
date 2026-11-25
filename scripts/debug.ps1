@@ -17,6 +17,7 @@
 #   ... -GpuTiming                     # rank GPU time by pipeline ("the card's time by command"); frames get slower
 #   ... -GpuTiming -BarrierTest indirect   # TIMING ONLY: how much the ~12,000 GPU waits around indirect commands cost
 #   ... -CardBuffersMinMB 16           # the layer's own default (the script uses 1: the card compares buffers of 1 MiB+, up to 512 MB)
+#   ... -MeshMerge                     # experimental: merge the game's consecutive mesh draws into one GPU command each
 #   ... -MeshCounts why                # experimental: mesh shaders declare the counts the game asks for, not 128 (needs a rebuild)
 #   ... -Console series-s              # the game believes it runs on a Series S: lower resolution, textures and memory budgets
 #   ... -DisplayMode 2560x1440         # the default reports a 1080p TV (less GPU work and VRAM); 3840x2160 is the layer's own
@@ -44,6 +45,7 @@ param(
     [int]$CardBuffersMB = 768,                        # VICTORY_CARD_BUFFERS_MB: most bytes of such copies (layer default 512; 1024 was faster but went over the VRAM budget)
     [switch]$IndirectWindow,                          # kept for old command lines: the window is on by default
     [switch]$NoIndirectWindow,
+    [switch]$MeshMerge,                               # VICTORY_MESH_MERGE=1: consecutive indirect mesh draws recorded as one (experimental)
     [string]$MeshCounts = "",                         # VICTORY_MESH_COUNTS: 1 = mesh shaders set their own output counts; why = also say per shader
     [int]$TextureIdleMS = 1000,                       # unused texture copies leave the card after 1 s (layer default 5000)
     [ValidateSet("series-x", "series-s")][string]$Console = "series-x",   # the Xbox model the game sees; series-s picks its lighter settings
@@ -69,7 +71,7 @@ foreach ($v in "VICTORY_KEYS", "VICTORY_CAPTURE", "VICTORY_CAPTURE_FRAMES", "VIC
                "VICTORY_WAVE_WHY", "VICTORY_WAVE_WIDE", "VICTORY_FIRSTLANE_LOCAL", "VICTORY_MEMORY_WRITES",
                "VICTORY_INPLACE", "VICTORY_INPLACE_MB", "VICTORY_INPLACE_PROBE",
                "VICTORY_GPU_TIMING", "VICTORY_D3D12_DRED", "VICTORY_BARRIER_TEST", "VICTORY_SHADER_SAVE",
-               "VICTORY_CARD_BUFFERS_MIN_MB", "VICTORY_CARD_BUFFERS_MB", "VICTORY_INDIRECT_WINDOW", "VICTORY_TEXTURE_IDLE_MS", "VICTORY_DISPLAY_MODE", "VICTORY_MESH_COUNTS") {
+               "VICTORY_CARD_BUFFERS_MIN_MB", "VICTORY_CARD_BUFFERS_MB", "VICTORY_INDIRECT_WINDOW", "VICTORY_TEXTURE_IDLE_MS", "VICTORY_DISPLAY_MODE", "VICTORY_MESH_COUNTS", "VICTORY_MESH_MERGE") {
     Remove-Item "Env:$v" -ErrorAction SilentlyContinue
 }
 New-Item -ItemType Directory -Force $Cache, $Data | Out-Null
@@ -112,6 +114,7 @@ if ($Fast)     { $env:VICTORY_RELAY = "2" }
 if (-not $NoWideBack) { $env:VICTORY_WIDE_BACK = "1" }
 if ($CardBuffersMinMB -gt 0) { $env:VICTORY_CARD_BUFFERS_MIN_MB = "$CardBuffersMinMB" }
 if ($CardBuffersMB -gt 0)    { $env:VICTORY_CARD_BUFFERS_MB = "$CardBuffersMB" }
+if ($MeshMerge) { $env:VICTORY_MESH_MERGE = "1" }
 if ($MeshCounts) { $env:VICTORY_MESH_COUNTS = $MeshCounts }
 if ($DisplayMode) { $env:VICTORY_DISPLAY_MODE = $DisplayMode }
 if ($TextureIdleMS -gt 0) { $env:VICTORY_TEXTURE_IDLE_MS = "$TextureIdleMS" }
@@ -134,7 +137,7 @@ if (-not $found) {
 }
 $Exe = (Resolve-Path $found).Path
 Write-Host "exe: $Exe`ncache: $Cache`nlog: $Log"
-Write-Host "builder=$([bool]$Builder) quarantine=$([bool]($Builder -and -not $NoQuarantine)) firstlane=$([bool]$FirstLaneLocal) namedwrites=$([bool]$NamedWrites) inplace=$InPlace gputiming=$([bool]$GpuTiming) barriertest=$BarrierTest wavewhy=$([bool]$WaveWhy) wavewide=$([bool]$WaveWide) fast=$([bool]$Fast) wideback=$(-not $NoWideBack) cardmin=$CardBuffersMinMB indirectwindow=$(-not $NoIndirectWindow) cardmb=$CardBuffersMB texidle=$TextureIdleMS display=$DisplayMode console=$Console meshcounts=$MeshCounts texpct=$TexturePct texbudget=$TextureBudgetMB"
+Write-Host "builder=$([bool]$Builder) quarantine=$([bool]($Builder -and -not $NoQuarantine)) firstlane=$([bool]$FirstLaneLocal) namedwrites=$([bool]$NamedWrites) inplace=$InPlace gputiming=$([bool]$GpuTiming) barriertest=$BarrierTest wavewhy=$([bool]$WaveWhy) wavewide=$([bool]$WaveWide) fast=$([bool]$Fast) wideback=$(-not $NoWideBack) cardmin=$CardBuffersMinMB indirectwindow=$(-not $NoIndirectWindow) cardmb=$CardBuffersMB texidle=$TextureIdleMS display=$DisplayMode console=$Console meshcounts=$MeshCounts meshmerge=$([bool]$MeshMerge) texpct=$TexturePct texbudget=$TextureBudgetMB"
 
 # (A first "NativeCommandError" line in the log is only PowerShell wrapping stderr; harmless.)
 $env:NO_COLOR = "1"
@@ -146,7 +149,7 @@ $patterns = @(
     "builder", "host pipeline refused", "host mesh pipeline", "WAVE64-RETRY",
     "converter shader", "dropped .* without a host pipeline: ", "library saved",
     "ms/frame", "textures picked by index", "device removed", "ERROR",
-    "program without a host pipeline", "MESH-COUNTS", "indirect mesh draws per frame", "indirect mesh draws reading the next record", "in place", "copystat: memory: ", "display mode reported", "depth texture with", "swap chain",  "time by command", "the card's clock", "dstorage", "black frame", "enables the", "buffer view", "constant buffer not", "does not translate"
+    "program without a host pipeline", "MESH-COUNTS", "indirect mesh draws per frame", "merged indirect mesh draws", "record assembler", "merged mesh command signature", "indirect mesh draws reading the next record", "in place", "copystat: memory: ", "display mode reported", "depth texture with", "swap chain",  "time by command", "the card's clock", "dstorage", "black frame", "enables the", "buffer view", "constant buffer not", "does not translate"
 ) -join "|"
 Select-String -Path $Log -Pattern $patterns |
     ForEach-Object { $_.Line.Trim() } |

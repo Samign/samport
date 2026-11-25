@@ -391,6 +391,126 @@ fn record_clamp_as(
     true
 }
 
+const ASSEMBLE: &str = r#"
+#define RS "RootConstants(num32BitConstants=4, b0), SRV(t0), SRV(t1), UAV(u0)"
+cbuffer Records : register(b0) {
+    uint records;
+    uint record_dwords;
+    uint head_dwords;
+    uint step;
+};
+// Per record: its root arguments, as the draw would have set them.
+ByteAddressBuffer heads : register(t0);
+// The clamped records, `step` bytes apart from the first one.
+ByteAddressBuffer clamped : register(t1);
+RWByteAddressBuffer merged : register(u0);
+[RootSignature(RS)]
+[numthreads(64, 1, 1)]
+void main(uint3 id : SV_DispatchThreadID) {
+    if (id.x >= records) return;
+    uint dst = id.x * record_dwords * 4;
+    for (uint k = 0; k < head_dwords; k++) {
+        merged.Store(dst + k * 4, heads.Load((id.x * head_dwords + k) * 4));
+    }
+    merged.Store3(dst + head_dwords * 4, clamped.Load3(id.x * step));
+}
+"#;
+
+fn assembler() -> Option<&'static Clamp> {
+    static MADE: std::sync::OnceLock<Option<Clamp>> = std::sync::OnceLock::new();
+    MADE.get_or_init(|| {
+        let device = host()?.device.clone();
+        let mut code: Option<ID3DBlob> = None;
+        let mut errors: Option<ID3DBlob> = None;
+        // SAFETY: the source and names live through the call; out pointers ours.
+        let compiled = unsafe {
+            D3DCompile(
+                ASSEMBLE.as_ptr().cast(),
+                ASSEMBLE.len(),
+                s!("assemble"),
+                None,
+                None,
+                s!("main"),
+                s!("cs_5_1"),
+                0,
+                0,
+                &mut code,
+                Some(&mut errors),
+            )
+        };
+        if compiled.is_err() {
+            tracing::warn!("no record assembler: indirect mesh draws are not merged");
+            return None;
+        }
+        let code = code?;
+        // SAFETY: the blob's own bytes; the root signature is inside the shader.
+        unsafe {
+            let bytes = std::slice::from_raw_parts(code.GetBufferPointer().cast::<u8>(), code.GetBufferSize());
+            let root: ID3D12RootSignature = device.CreateRootSignature(0, bytes).ok()?;
+            let pso = device
+                .CreateComputePipelineState(&D3D12_COMPUTE_PIPELINE_STATE_DESC {
+                    pRootSignature: std::mem::transmute_copy(&root),
+                    CS: D3D12_SHADER_BYTECODE {
+                        pShaderBytecode: bytes.as_ptr().cast(),
+                        BytecodeLength: bytes.len(),
+                    },
+                    ..Default::default()
+                })
+                .ok()?;
+            Some(Clamp { root, pso })
+        }
+    })
+    .as_ref()
+}
+
+/// Records, in `list`, the assembly of `records` merged indirect records of
+/// `record_dwords` dwords at `merged` (a range of a buffer in the common
+/// state, left in `INDIRECT_ARGUMENT`): each one's `head_dwords` root
+/// argument dwords from `heads` (upload memory), then the three dwords of
+/// the clamped record `step` bytes apart from `clamped` (the scratch buffer
+/// in the common state, left there). Replaces the list's compute root
+/// signature and pipeline. False without the assembler.
+pub(crate) fn assemble(
+    list: &HostList,
+    (records, record_dwords, head_dwords, step): (u32, u32, u32, u32),
+    heads: u64,
+    (scratch, clamped): (&ID3D12Resource, u64),
+    (buffer, merged): (&ID3D12Resource, u64),
+) -> bool {
+    let Some(a) = assembler() else {
+        return false;
+    };
+    let l = &list.list;
+    let constants = [records, record_dwords, head_dwords, step];
+    // SAFETY: an open list; our root signature and pipeline; live buffers.
+    unsafe {
+        // The scratch buffer as the clamp left it, read by a shader.
+        l.ResourceBarrier(&[
+            transition(scratch, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE),
+            transition(buffer, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_UNORDERED_ACCESS),
+        ]);
+        l.SetComputeRootSignature(&a.root);
+        l.SetPipelineState(&a.pso);
+        l.SetComputeRoot32BitConstants(0, 4, constants.as_ptr().cast(), 0);
+        l.SetComputeRootShaderResourceView(1, heads);
+        l.SetComputeRootShaderResourceView(2, scratch.GetGPUVirtualAddress() + clamped);
+        l.SetComputeRootUnorderedAccessView(3, buffer.GetGPUVirtualAddress() + merged);
+        l.Dispatch(records.div_ceil(64), 1, 1);
+        l.ResourceBarrier(&[
+            transition(scratch, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COMMON),
+            transition(buffer, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT),
+        ]);
+    }
+    list.keep(buffer);
+    true
+}
+
+/// After the merged records' indirect execution: their buffer back to the
+/// common state.
+pub(crate) fn assembled_done(list: &HostList, buffer: &ID3D12Resource) {
+    done(list, buffer);
+}
+
 /// After indirect execution (or if preparation failed after [`bound`]):
 /// returns the scratch buffer to the common state for the next call.
 pub(crate) fn done(list: &HostList, scratch: &ID3D12Resource) {

@@ -143,6 +143,40 @@ const _: () = assert!(offset_of!(List, pipeline_shadow) + 32 == 0x560);
 /// is a host GPU.
 #[cfg(windows)]
 fn with_state(this: This, f: impl FnOnce(&crate::host::HostList, &mut crate::draw::State)) {
+    state_call(this, true, f);
+}
+
+/// [`with_state`] for calls that only change what the title has set
+/// (pipeline, heaps, root arguments, vertex and index buffers) and for
+/// indirect execution: a batch of merged draws waiting stays open across
+/// them (`crate::draw::State::flush_merge`).
+#[cfg(windows)]
+fn with_state_keep(this: This, f: impl FnOnce(&crate::host::HostList, &mut crate::draw::State)) {
+    state_call(this, false, f);
+}
+
+/// Records whatever merged draws of the title list wait, before something
+/// else is recorded on its host list.
+#[cfg(windows)]
+fn flush_merge(this: This) {
+    if this.is_null() {
+        return;
+    }
+    let Some(list) = host_list(this) else { return };
+    // SAFETY: the title passes one of our lists.
+    let state = unsafe { &(*this.cast::<List>()).state };
+    state.lock().unwrap_or_else(|e| e.into_inner()).flush_merge(list);
+}
+
+/// The host list after the merged draws waiting are recorded.
+#[cfg(windows)]
+fn host_list_flushed<'a>(this: This) -> Option<&'a crate::host::HostList> {
+    flush_merge(this);
+    host_list(this)
+}
+
+#[cfg(windows)]
+fn state_call(this: This, flush: bool, f: impl FnOnce(&crate::host::HostList, &mut crate::draw::State)) {
     let Some(list) = host_list(this) else { return };
     #[cfg(feature = "diagnostics")]
     let started = std::time::Instant::now();
@@ -150,6 +184,9 @@ fn with_state(this: This, f: impl FnOnce(&crate::host::HostList, &mut crate::dra
     let state = unsafe { &(*this.cast::<List>()).state };
     let mut state = state.lock().unwrap_or_else(|e| e.into_inner());
     state.calls += 1;
+    if flush {
+        state.flush_merge(list);
+    }
     f(list, &mut state);
     #[cfg(feature = "diagnostics")]
     crate::copystat::recorded(started);
@@ -302,6 +339,7 @@ fn cut(this: This, wait: ValueWait) {
     if this.is_null() {
         return;
     }
+    flush_merge(this);
     // SAFETY: the title passes one of our lists; a list is recorded by one
     // thread at a time and is not submitted while it records.
     let list = unsafe { &mut *this.cast_mut().cast::<List>() };
@@ -621,7 +659,7 @@ extern "system" fn list_type(this: This) -> u32 {
 }
 extern "system" fn close(this: This) -> HRESULT {
     #[cfg(windows)]
-    if let Some(host) = host_list(this) {
+    if let Some(host) = host_list_flushed(this) {
         host.close();
     }
     S_OK
@@ -741,7 +779,7 @@ const UAV_BARRIER: Barrier = Barrier {
 /// Returns the console's barrier "actions" (none).
 extern "system" fn barrier(this: This, count: u32, barriers: *const Barrier) -> u32 {
     #[cfg(windows)]
-    if let Some(list) = host_list(this)
+    if let Some(list) = host_list_flushed(this)
         && !barriers.is_null()
     {
         // SAFETY: the title passes `count` barriers.
@@ -817,7 +855,7 @@ extern "system" fn copy_buffer_region(
     len: u64,
 ) {
     #[cfg(windows)]
-    if let Some(list) = host_list(this)
+    if let Some(list) = host_list_flushed(this)
         && let Some(to) = buffer_range(dst, dst_offset, len)
         && let Some(from) = buffer_range(src, src_offset, len)
     {
@@ -845,7 +883,7 @@ fn unlike(dst: This, src: This) -> bool {
 extern "system" fn copy_resource(this: This, dst: This, src: This) {
     #[cfg(windows)]
     {
-        let Some(list) = host_list(this) else {
+        let Some(list) = host_list_flushed(this) else {
             return;
         };
         if let (Some(to), Some(from)) = (
@@ -914,7 +952,7 @@ extern "system" fn copy_texture_region(
         const FOOTPRINT: u32 = 1;
         // SAFETY: the title passes both locations (null is tolerated).
         let (Some(list), Some(&dst), Some(&src)) =
-            (host_list(this), unsafe { dst.as_ref() }, unsafe {
+            (host_list_flushed(this), unsafe { dst.as_ref() }, unsafe {
                 src.as_ref()
             })
         else {
@@ -1129,7 +1167,7 @@ extern "system" fn resolve(
     format: u32,
 ) {
     #[cfg(windows)]
-    if let Some(list) = host_list(this)
+    if let Some(list) = host_list_flushed(this)
         && let (Some(to), Some(from)) = (
             crate::resource::host_resource(dst),
             crate::resource::host_resource(src),
@@ -1204,7 +1242,7 @@ extern "system" fn clear_rtv(
 ) {
     #[cfg(windows)]
     {
-        let (Some(list), Some(record)) = (host_list(this), crate::descriptor::rtv_record(handle))
+        let (Some(list), Some(record)) = (host_list_flushed(this), crate::descriptor::rtv_record(handle))
         else {
             return;
         };
@@ -1255,7 +1293,7 @@ extern "system" fn clear_dsv(
     #[cfg(windows)]
     {
         use windows::Win32::Graphics::Direct3D12::D3D12_CLEAR_FLAGS;
-        let (Some(list), Some(record)) = (host_list(this), crate::descriptor::dsv_record(handle))
+        let (Some(list), Some(record)) = (host_list_flushed(this), crate::descriptor::dsv_record(handle))
         else {
             return;
         };
@@ -1292,7 +1330,7 @@ extern "system" fn clear_dsv(
 /// are title memory, copied at submission like buffer copies (if mapped).
 extern "system" fn copy_memory(this: This, dst: u64, src: u64, len: u64, _flags: u32) {
     #[cfg(windows)]
-    if let Some(list) = host_list(this)
+    if let Some(list) = host_list_flushed(this)
         && dst != 0
         && src != 0
     {
@@ -1389,7 +1427,7 @@ static ALLOCATOR_FUNCTIONS: Table<24> = {
 extern "system" fn set_pipeline(this: This, pipeline: This) {
     crate::pipeline::bound(pipeline);
     #[cfg(windows)]
-    with_state(this, |_, state| state.set_pipeline(pipeline));
+    with_state_keep(this, |_, state| state.set_pipeline(pipeline));
     #[cfg(not(windows))]
     let _ = this;
 }
@@ -1489,16 +1527,16 @@ mod state {
         with_state(this, |list, s| s.set_stencil_ref(list, reference));
     }
     pub(super) extern "system" fn heaps(this: This, count: u32, heaps: *const This) {
-        with_state(this, |_, s| s.set_heaps(items(heaps, count)));
+        with_state_keep(this, |_, s| s.set_heaps(items(heaps, count)));
     }
     pub(super) extern "system" fn compute_table(this: This, slot: u32, handle: u64) {
-        with_state(this, |_, s| s.set_table(true, slot, handle));
+        with_state_keep(this, |_, s| s.set_table(true, slot, handle));
     }
     pub(super) extern "system" fn graphics_table(this: This, slot: u32, handle: u64) {
-        with_state(this, |_, s| s.set_table(false, slot, handle));
+        with_state_keep(this, |_, s| s.set_table(false, slot, handle));
     }
     pub(super) extern "system" fn compute_constant(this: This, slot: u32, value: u32, offset: u32) {
-        with_state(this, |_, s| s.set_constants(true, slot, &[value], offset));
+        with_state_keep(this, |_, s| s.set_constants(true, slot, &[value], offset));
     }
     pub(super) extern "system" fn graphics_constant(
         this: This,
@@ -1506,7 +1544,7 @@ mod state {
         value: u32,
         offset: u32,
     ) {
-        with_state(this, |_, s| s.set_constants(false, slot, &[value], offset));
+        with_state_keep(this, |_, s| s.set_constants(false, slot, &[value], offset));
     }
     pub(super) extern "system" fn compute_constants(
         this: This,
@@ -1515,7 +1553,7 @@ mod state {
         values: *const u32,
         offset: u32,
     ) {
-        with_state(this, |_, s| {
+        with_state_keep(this, |_, s| {
             s.set_constants(true, slot, items(values, count), offset)
         });
     }
@@ -1526,20 +1564,20 @@ mod state {
         values: *const u32,
         offset: u32,
     ) {
-        with_state(this, |_, s| {
+        with_state_keep(this, |_, s| {
             s.set_constants(false, slot, items(values, count), offset)
         });
     }
     /// Root constant buffer, shader resource and unordered access views.
     pub(super) extern "system" fn compute_view(this: This, slot: u32, address: u64) {
-        with_state(this, |_, s| s.set_view(true, slot, address));
+        with_state_keep(this, |_, s| s.set_view(true, slot, address));
     }
     pub(super) extern "system" fn graphics_view(this: This, slot: u32, address: u64) {
-        with_state(this, |_, s| s.set_view(false, slot, address));
+        with_state_keep(this, |_, s| s.set_view(false, slot, address));
     }
     pub(super) extern "system" fn index_buffer(this: This, view: *const IndexView) {
         // SAFETY: the title passes a view or null.
-        with_state(this, |_, s| s.set_index_buffer(unsafe { view.as_ref() }));
+        with_state_keep(this, |_, s| s.set_index_buffer(unsafe { view.as_ref() }));
     }
     pub(super) extern "system" fn vertex_buffers(
         this: This,
@@ -1705,7 +1743,7 @@ extern "system" fn execute_indirect(
         const DISPATCH: u32 = 2;
         const DISPATCH_SINGLE: u32 = 105;
         let kind = if *kind == DISPATCH_SINGLE { DISPATCH } else { *kind };
-        with_state(this, |list, s| {
+        with_state_keep(this, |list, s| {
             ran = s.execute_indirect(list, (kind, stride, max), address, counter);
         });
     } else {
@@ -1907,7 +1945,7 @@ fn wait_for(this: This, address: u64, comparison: u32, reference: u64, wide: boo
         );
     }
     #[cfg(all(windows, feature = "diagnostics"))]
-    if let Some(host) = host_list(this) {
+    if let Some(host) = host_list_flushed(this) {
         crate::capture::op(std::ptr::from_ref(host) as usize, || {
             format!(
                 "WAIT VALUE at {address:#x} comparison {comparison} reference {reference:#x} wide {wide} met {}",
@@ -1949,7 +1987,7 @@ extern "system" fn barrier_groups(this: This, count: u32, _groups: *const u8) {
     }
     #[cfg(windows)]
     if count > 0
-        && let Some(list) = host_list(this)
+        && let Some(list) = host_list_flushed(this)
     {
         use windows::Win32::Graphics::Direct3D12::D3D12_RESOURCE_BARRIER;
         // SAFETY: the same layout; no resource named.
@@ -2000,7 +2038,7 @@ fn value_written(this: This, address: u64, value: u64) {
         #[cfg(not(feature = "diagnostics"))]
         let _ = value;
         #[cfg(feature = "diagnostics")]
-        if let Some(host) = host_list(this) {
+        if let Some(host) = host_list_flushed(this) {
             crate::capture::op(std::ptr::from_ref(host) as usize, || {
                 format!("WRITE VALUE at {address:#x} value {value:#x}")
             });
@@ -2011,6 +2049,7 @@ fn value_written(this: This, address: u64, value: u64) {
         {
             return;
         }
+        flush_merge(this);
         // SAFETY: the title passes one of our lists; a list is recorded by
         // one thread at a time and is not submitted while it records.
         let list = unsafe { &mut *this.cast_mut().cast::<List>() };
@@ -2043,7 +2082,7 @@ fn defer_write(this: This, address: u64, what: Written, bytes: usize) {
         return;
     }
     #[cfg(windows)]
-    if let Some(list) = host_list(this) {
+    if let Some(list) = host_list_flushed(this) {
         list.defer_write(address as *mut u8, what, bytes);
         return;
     }

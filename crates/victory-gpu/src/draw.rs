@@ -182,6 +182,11 @@ pub(crate) struct State {
     /// the last indirect mesh draw: the call count at it, its state's hash,
     /// its argument copy and offset (for [`note_mergeable`]).
     pub(crate) calls: u64,
+    /// `VICTORY_MESH_MERGE`: the root arguments a draw's binding would set,
+    /// taken instead of set while a draw may join a merged batch, and that
+    /// batch, not yet recorded ([`State::flush_merge`]).
+    capture: Option<Vec<Capt>>,
+    pending: Option<Batch>,
     #[cfg(feature = "diagnostics")]
     last_mesh: Option<MeshSnap>,
     /// What the host list has: pipeline, root signature, heaps.
@@ -422,6 +427,107 @@ impl State {
     pub(crate) fn reset(&mut self, pipeline: This) {
         *self = State::default();
         self.pipeline = pipeline as usize;
+    }
+
+    /// Records the batch of merged mesh draws waiting, if any ([`merge_on`]):
+    /// one indirect execution over records assembled on the card, or the
+    /// draws one by one where that cannot be made. Called before anything
+    /// else is recorded on the list.
+    pub(crate) fn flush_merge(&mut self, list: &HostList) {
+        let Some(b) = self.pending.take() else {
+            return;
+        };
+        let n = b.records.len() as u32;
+        DRAWN.fetch_add(u64::from(n), Ordering::Relaxed);
+        let (_, layout) = ordered(&b.records[0]);
+        let one_layout = b.records.iter().all(|r| ordered(r).1 == layout);
+        let merged = n > 1 && one_layout && self.record_merged(list, &b, &layout);
+        if !merged {
+            self.record_each(list, &b);
+        }
+        MERGED[0].fetch_add(u64::from(merged), Ordering::Relaxed);
+        MERGED[1].fetch_add(if merged { u64::from(n) } else { 0 }, Ordering::Relaxed);
+        static AT: AtomicU64 = AtomicU64::new(0);
+        static FRAME: AtomicU64 = AtomicU64::new(0);
+        let now = crate::host::now_ms();
+        let last = AT.load(Ordering::Relaxed);
+        if now >= last + 5_000 && AT.compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed).is_ok() {
+            let frame = crate::frame::current();
+            let frames = frame.saturating_sub(FRAME.swap(frame, Ordering::Relaxed)).max(1) as f64;
+            let [batches, draws] = [0, 1].map(|i| MERGED[i].swap(0, Ordering::Relaxed) as f64 / frames);
+            tracing::info!("merged indirect mesh draws per frame: {draws:.0} in {batches:.0} executions");
+        }
+    }
+
+    /// The batch's draws one by one, each with its own root arguments.
+    fn record_each(&mut self, list: &HostList, b: &Batch) {
+        const MESH: u32 = 10;
+        let Some(signature) = host_signature(MESH, b.step) else {
+            return;
+        };
+        let l = &list.list;
+        for (k, record) in b.records.iter().enumerate() {
+            for c in record {
+                apply(l, c);
+            }
+            // SAFETY: an open list with the batch's pipeline set; the scratch
+            // buffer is in the common state and held by the list.
+            unsafe {
+                l.ExecuteIndirect(&signature, 1, &b.scratch, b.base + k as u64 * u64::from(b.step), None::<&ID3D12Resource>, 0);
+            }
+            crate::indirect::done(list, &b.scratch);
+        }
+    }
+
+    /// The batch as one indirect execution; false if it could not be made
+    /// (nothing recorded then).
+    fn record_merged(&mut self, list: &HostList, b: &Batch, layout: &[(u8, u32, u32)]) -> bool {
+        let n = b.records.len() as u32;
+        let Some((signature, record_bytes)) = merge_signature(&b.root, layout) else {
+            return false;
+        };
+        let head_dwords: u32 = layout.iter().map(|&(kind, _, count)| if kind == 0 { count } else { 2 }).sum();
+        let Some((heads, data)) = list.scratch(u64::from(n * head_dwords * 4)) else {
+            return false;
+        };
+        let mut words: Vec<u32> = Vec::with_capacity((n * head_dwords) as usize);
+        for record in &b.records {
+            for c in ordered(record).0 {
+                match c {
+                    Capt::Constants(_, v) => words.extend_from_slice(v),
+                    Capt::Cbv(_, gpu) | Capt::Srv(_, gpu) => words.extend_from_slice(&[*gpu as u32, (*gpu >> 32) as u32]),
+                }
+            }
+        }
+        if words.len() != (n * head_dwords) as usize {
+            return false;
+        }
+        // SAFETY: the scratch range holds `n * head_dwords` dwords.
+        unsafe { std::ptr::copy_nonoverlapping(words.as_ptr(), data.cast::<u32>(), words.len()) };
+        let Some((buffer, offset)) = list.merge_args(u64::from(n * record_bytes)) else {
+            return false;
+        };
+        if !crate::indirect::assemble(
+            list,
+            (n, record_bytes / 4, head_dwords, b.step),
+            heads,
+            (&b.scratch, b.base),
+            (&buffer, offset),
+        ) {
+            return false;
+        }
+        let l = &list.list;
+        // SAFETY: an open list; the assembler replaced the pipeline, the
+        // batch's is set again (its graphics root signature stayed); the
+        // records are in INDIRECT_ARGUMENT and the list holds their buffer.
+        unsafe {
+            l.SetPipelineState(&b.pso);
+            l.ExecuteIndirect(&signature, n, &buffer, offset, None::<&ID3D12Resource>, 0);
+        }
+        crate::indirect::assembled_done(list, &buffer);
+        self.host_pipeline = b.pso.as_raw() as usize;
+        self.host_roots[1] = 0;
+        true
     }
 
     /// The title's topology; console-only ones become host lists (see
@@ -946,7 +1052,10 @@ impl State {
                     if compute {
                         l.SetComputeRoot32BitConstants(param, dwords, values.as_ptr().cast(), 0);
                     } else {
-                        l.SetGraphicsRoot32BitConstants(param, dwords, values.as_ptr().cast(), 0);
+                        match self.capture.as_mut() {
+                            Some(c) => c.push(Capt::Constants(param, values.clone())),
+                            None => l.SetGraphicsRoot32BitConstants(param, dwords, values.as_ptr().cast(), 0),
+                        }
                     }
                 }
             }
@@ -961,7 +1070,10 @@ impl State {
                                 if compute {
                                     l.SetComputeRootShaderResourceView(param, m.directory);
                                 } else {
-                                    l.SetGraphicsRootShaderResourceView(param, m.directory);
+                                    match self.capture.as_mut() {
+                                        Some(c) => c.push(Capt::Srv(param, m.directory)),
+                                        None => l.SetGraphicsRootShaderResourceView(param, m.directory),
+                                    }
                                 }
                             }
                         }
@@ -977,7 +1089,10 @@ impl State {
                                 if compute {
                                     l.SetComputeRootShaderResourceView(param, gpu);
                                 } else {
-                                    l.SetGraphicsRootShaderResourceView(param, gpu);
+                                    match self.capture.as_mut() {
+                                        Some(c) => c.push(Capt::Srv(param, gpu)),
+                                        None => l.SetGraphicsRootShaderResourceView(param, gpu),
+                                    }
                                 }
                             },
                             None => once!("a shader picks buffers from a view heap that is not set"),
@@ -1021,8 +1136,14 @@ impl State {
                     // SAFETY: an open list; the address is in live memory.
                     unsafe {
                         match (compute, srv) {
-                            (false, false) => l.SetGraphicsRootConstantBufferView(param, gpu),
-                            (false, true) => l.SetGraphicsRootShaderResourceView(param, gpu),
+                            (false, false) => match self.capture.as_mut() {
+                                Some(c) => c.push(Capt::Cbv(param, gpu)),
+                                None => l.SetGraphicsRootConstantBufferView(param, gpu),
+                            },
+                            (false, true) => match self.capture.as_mut() {
+                                Some(c) => c.push(Capt::Srv(param, gpu)),
+                                None => l.SetGraphicsRootShaderResourceView(param, gpu),
+                            },
                             (true, false) => l.SetComputeRootConstantBufferView(param, gpu),
                             (true, true) => l.SetComputeRootShaderResourceView(param, gpu),
                         }
@@ -2376,6 +2497,34 @@ impl State {
             .filter(|w| same(w) && offset >= w.base)
             .filter(|w| (offset - w.base) % u64::from(w.step) == 0 && (offset - w.base) / u64::from(w.step) < u64::from(w.records))
             .map(|w| (w.scratch.clone(), offset - w.base));
+        // Merging (`merge_on`): a batch waiting ends unless this draw reads
+        // its next record with the same pipeline, heaps, targets, viewports
+        // and scissors (before a new window is clamped into the scratch
+        // buffer the batch reads, and before this draw's binding).
+        let merging = kind == MESH && windowed && merge_on() && mergeable(p);
+        let view_now = (
+            self.viewports
+                .iter()
+                .map(|v| [v.TopLeftX, v.TopLeftY, v.Width, v.Height, v.MinDepth, v.MaxDepth].map(f32::to_bits))
+                .collect::<Vec<_>>(),
+            self.scissors.iter().map(|r| [r.left, r.top, r.right, r.bottom]).collect::<Vec<_>>(),
+        );
+        if let Some(b) = &self.pending {
+            let fits = merging
+                && b.records.len() < WINDOW_MOST as usize
+                && hit.as_ref().is_some_and(|(scratch, at)| {
+                    scratch.as_raw() == b.scratch.as_raw() && *at == b.base + b.records.len() as u64 * u64::from(b.step)
+                })
+                && b.pipeline == self.pipeline
+                && b.heaps == self.heaps
+                && b.targets.0 == self.target_handles
+                && b.targets.1 == self.depth_handle
+                && b.view == view_now;
+            if !fits {
+                self.flush_merge(list);
+            }
+        }
+        let fresh_window = hit.is_none();
         let (bounded, at) = match hit {
             Some(hit) => hit,
             None => {
@@ -2434,16 +2583,46 @@ impl State {
                 (bounded, 0)
             }
         };
+        if merging {
+            self.capture = Some(Vec::new());
+        }
         let ran = match kind {
             DRAW | INDEXED => self.prepare(list, kind == INDEXED),
             MESH => self.prepare_for(list, false, true),
             DISPATCH => self.bind(list, p, true),
             _ => false,
         };
+        let captured = self.capture.take();
         if !ran {
             crate::indirect::done(list, &bounded);
             why("prepare failed");
             return false;
+        }
+        if let (true, Some(capt)) = (merging, captured) {
+            // The clamp left a new window's scratch buffer for indirect
+            // reading: back to the common state, as after an execution.
+            if fresh_window {
+                crate::indirect::done(list, &bounded);
+            }
+            let step = self.window.as_ref().map_or(stride, |w| w.step);
+            match &mut self.pending {
+                Some(b) => b.records.push(capt),
+                None => {
+                    self.pending = Some(Batch {
+                        pso: p.pso.clone(),
+                        root: p.root.clone(),
+                        pipeline: self.pipeline,
+                        heaps: self.heaps,
+                        targets: (self.target_handles.clone(), self.depth_handle),
+                        view: view_now,
+                        scratch: bounded.clone(),
+                        base: at,
+                        step,
+                        records: vec![capt],
+                    })
+                }
+            }
+            return true;
         }
         #[cfg(feature = "diagnostics")]
         list.note_op(|| {
@@ -2513,6 +2692,174 @@ impl State {
         }
         true
     }
+}
+
+/// A graphics root argument a draw's binding sets: root parameter and value.
+#[derive(Clone, PartialEq)]
+pub(crate) enum Capt {
+    Constants(u32, Vec<u32>),
+    Cbv(u32, u64),
+    Srv(u32, u64),
+}
+
+/// Indirect mesh draws waiting to be recorded as one (`VICTORY_MESH_MERGE`):
+/// consecutive records of one clamped window (`windows`), drawn with one
+/// pipeline, the same heaps, targets, viewports and scissors, nothing else
+/// recorded between them; per draw only its root arguments differ. The host
+/// list holds the pipeline and the root signature they were bound with.
+pub(crate) struct Batch {
+    pso: ID3D12PipelineState,
+    root: ID3D12RootSignature,
+    pipeline: usize,
+    heaps: [usize; 2],
+    targets: (Vec<u64>, u64),
+    view: (Vec<[u32; 6]>, Vec<[i32; 4]>),
+    scratch: ID3D12Resource,
+    /// The first record's offset in the scratch buffer, and the step to the next.
+    base: u64,
+    step: u32,
+    records: Vec<Vec<Capt>>,
+}
+
+/// Indirect mesh draws merged (`VICTORY_MESH_MERGE=1`; off by default).
+///
+/// The title issues its mesh draws one record per call, and between two of
+/// them it sets new root arguments (a table offset, constants, root views):
+/// one indirect execution per draw, ~4,000 a frame. Indirect execution
+/// can set root constants and root views per record, so consecutive draws
+/// that differ only there are recorded as one: each draw's binding takes its
+/// root arguments ([`Capt`]) instead of setting them, and when the batch
+/// ends a pass of ours writes, per draw, those arguments and its clamped
+/// record into one buffer ([`crate::indirect::assemble`]), read by one
+/// indirect execution with a command signature of those arguments.
+/// What else a draw's binding records (resource states, uploads, the
+/// refresh of what it reads) lands before the batch's execution instead of
+/// before the draw's: draws in a batch only read (`windows` takes no draw
+/// whose shaders store), so the earlier ones read the same.
+fn merge_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        let on = std::env::var_os("VICTORY_MESH_MERGE").is_some_and(|v| v == "1");
+        if on {
+            tracing::info!("indirect mesh draws are merged (VICTORY_MESH_MERGE=1)");
+        }
+        on
+    })
+}
+
+/// Batches recorded and the draws in them, since the last line.
+static MERGED: [AtomicU64; 2] = [const { AtomicU64::new(0) }; 2];
+
+/// A command signature setting `layout`'s root arguments ([`Capt`] kinds:
+/// 0 constants with their count, 1 root CBV, 2 root SRV, by parameter),
+/// then a mesh dispatch, for `root`; and its record stride. Made once.
+fn merge_signature(root: &ID3D12RootSignature, layout: &[(u8, u32, u32)]) -> Option<(ID3D12CommandSignature, u32)> {
+    type Key = (usize, Vec<(u8, u32, u32)>);
+    static MADE: std::sync::Mutex<Vec<(Key, ID3D12CommandSignature, u32)>> = std::sync::Mutex::new(Vec::new());
+    let key: Key = (root.as_raw() as usize, layout.to_vec());
+    let mut made = MADE.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((_, sig, stride)) = made.iter().find(|(k, _, _)| *k == key) {
+        return Some((sig.clone(), *stride));
+    }
+    let mut args = Vec::new();
+    let mut bytes = 0u32;
+    for &(kind, param, n) in layout {
+        let mut a = D3D12_INDIRECT_ARGUMENT_DESC::default();
+        match kind {
+            0 => {
+                a.Type = D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT;
+                a.Anonymous.Constant = D3D12_INDIRECT_ARGUMENT_DESC_0_1 {
+                    RootParameterIndex: param,
+                    DestOffsetIn32BitValues: 0,
+                    Num32BitValuesToSet: n,
+                };
+                bytes += 4 * n;
+            }
+            1 => {
+                a.Type = D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT_BUFFER_VIEW;
+                a.Anonymous.ConstantBufferView = D3D12_INDIRECT_ARGUMENT_DESC_0_2 { RootParameterIndex: param };
+                bytes += 8;
+            }
+            _ => {
+                a.Type = D3D12_INDIRECT_ARGUMENT_TYPE_SHADER_RESOURCE_VIEW;
+                a.Anonymous.ShaderResourceView = D3D12_INDIRECT_ARGUMENT_DESC_0_3 { RootParameterIndex: param };
+                bytes += 8;
+            }
+        }
+        args.push(a);
+    }
+    args.push(D3D12_INDIRECT_ARGUMENT_DESC {
+        Type: D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH_MESH,
+        ..Default::default()
+    });
+    let stride = (bytes + 12).next_multiple_of(8);
+    let desc = D3D12_COMMAND_SIGNATURE_DESC {
+        ByteStride: stride,
+        NumArgumentDescs: args.len() as u32,
+        pArgumentDescs: args.as_ptr(),
+        NodeMask: 0,
+    };
+    let mut sig: Option<ID3D12CommandSignature> = None;
+    // SAFETY: a description of live arguments; the root signature is live.
+    let result = unsafe { crate::host::host()?.device.CreateCommandSignature(&desc, root, &mut sig) };
+    if let Err(e) = result {
+        once!(error = %e, ?layout, "merged mesh command signature refused: those draws are not merged");
+        return None;
+    }
+    let sig = sig?;
+    made.push((key, sig.clone(), stride));
+    Some((sig, stride))
+}
+
+/// A draw's captured arguments in the order a merged record holds them
+/// (root views first: their 8 bytes stay 8-aligned), and its layout.
+fn ordered(capt: &[Capt]) -> (Vec<&Capt>, Vec<(u8, u32, u32)>) {
+    let mut views: Vec<&Capt> = capt.iter().filter(|c| !matches!(c, Capt::Constants(..))).collect();
+    views.sort_by_key(|c| match c {
+        Capt::Cbv(p, _) | Capt::Srv(p, _) | Capt::Constants(p, _) => *p,
+    });
+    let mut consts: Vec<&Capt> = capt.iter().filter(|c| matches!(c, Capt::Constants(..))).collect();
+    consts.sort_by_key(|c| match c {
+        Capt::Cbv(p, _) | Capt::Srv(p, _) | Capt::Constants(p, _) => *p,
+    });
+    views.extend(consts);
+    let layout = views
+        .iter()
+        .map(|c| match c {
+            Capt::Constants(p, v) => (0, *p, v.len() as u32),
+            Capt::Cbv(p, _) => (1, *p, 2),
+            Capt::Srv(p, _) => (2, *p, 2),
+        })
+        .collect();
+    (views, layout)
+}
+
+/// Sets a captured argument on the list (a batch of one).
+fn apply(l: &ID3D12GraphicsCommandList, c: &Capt) {
+    // SAFETY: an open list; values taken from a binding for this pipeline.
+    unsafe {
+        match c {
+            Capt::Constants(p, v) => l.SetGraphicsRoot32BitConstants(*p, v.len() as u32, v.as_ptr().cast(), 0),
+            Capt::Cbv(p, gpu) => l.SetGraphicsRootConstantBufferView(*p, *gpu),
+            Capt::Srv(p, gpu) => l.SetGraphicsRootShaderResourceView(*p, *gpu),
+        }
+    }
+}
+
+/// Whether draws of `p` may be merged: a mesh pipeline whose binding sets
+/// only root constants, root CBVs and root SRVs (no root UAVs, no root SRV
+/// tables).
+fn mergeable(p: &HostPipeline) -> bool {
+    p.mesh
+        && !p.compute
+        && mesh_test() == 0
+        && p.stages.iter().all(|stage| {
+            stage.root_uavs.is_empty()
+                && (!crate::pipeline::host::bounded_root_srvs()
+                    || stage.root_srvs.iter().all(|&(slot, _)| {
+                        slot == victory_shader::emit::SLOT_MEMORY || slot == victory_shader::emit::SLOT_STRIDES
+                    }))
+        })
 }
 
 /// Indirect mesh draws since the last line, and of them those the one before

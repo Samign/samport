@@ -89,6 +89,7 @@ powershell -ExecutionPolicy Bypass -File scripts\debug.ps1 -Game "<your game fol
 | `-DisplayMode 1920x1080` / `VICTORY_DISPLAY_MODE` | **default in both scripts** (`-DisplayMode 3840x2160` for the layer's own): the TV size the console reports (layer default 3840x2160). If the game renders for the mode it is given, smaller means less GPU work and smaller render targets |
 | `-Console series-s` | the game believes it runs on an Xbox Series S (`--console series-s`). **Does not work yet**: in that mode the game loads `amd_fidelityfx_upscaler_xbox.dll`, which the host policy refuses, and it stays on a black screen (11 draws a frame) |
 | `-MeshCounts 1` / `VICTORY_MESH_COUNTS=1` (`why`: also print per shader) | experimental: a mesh shader declares the vertex and primitive counts the game asks for (its allocation request), where that can be done for all threads at once, instead of the declared maxima with the rest culled one by one; part of the shader cache key |
+| `-MeshMerge` / `VICTORY_MESH_MERGE=1` | experimental: consecutive indirect mesh draws of one clamped window, with the same pipeline, heaps, targets, viewports and scissors, are recorded as one indirect execution. Each draw's root constants and root views are taken instead of set; a compute pass writes them with its clamped record into one buffer, read with a command signature of those arguments. Anything else the title records first ends the batch. Logs `merged indirect mesh draws per frame` |
 | `VICTORY_CARD_BUFFERS_MB=0` | keeps the game's large buffers out of card memory (more room for textures, likely slower) |
 
 A failed DirectStorage write into physical pages now says why (an unknown page,
@@ -175,6 +176,8 @@ or a view that could not be mapped or committed).
   but not descriptor tables, so merging these draws would first need the translator to pass
   tables as heap indices (bindless) and the layer to stop making a table per draw: a rewrite of
   the binding model, not a patch. The counters are in diagnostics builds only.
+  Correction: the title's tables reach host shaders as root constants (heap offsets), not
+  as tables, so per-record root constants and views are enough: `-MeshMerge` does that.
 - Shaders saved with `VICTORY_SHADER_SAVE=<dir>` for study must stay outside
   the repository (docs/asset-policy.md).
 
