@@ -69,6 +69,7 @@ fn build() -> &'static [u8; 32] {
                     // translating: a run that asks for them gets its own cache.
                     "VICTORY_WAVE_WHY",
                     "VICTORY_FIRSTLANE_LOCAL",
+                    "VICTORY_MESH_COUNTS",
                 ] {
                     bytes.extend_from_slice(name.as_bytes());
                     bytes.push(b'=');

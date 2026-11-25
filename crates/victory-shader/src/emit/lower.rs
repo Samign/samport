@@ -108,6 +108,39 @@ const TWO_PI: f32 = std::f32::consts::TAU;
 /// `s_sendmsg` id of a mesh or NGG stage's output allocation request.
 const GS_ALLOC_REQ: u16 = 9;
 
+/// Mesh (`VICTORY_MESH_COUNTS`): the console program's own output counts, set
+/// at the end of block `at` instead of the declared maxima at the entry. `m0`
+/// is the allocation request's m0 (vertices | primitives << 12); `chain` the
+/// scalar instructions that make it, lowered again at `at` (they are pure, and
+/// what they read is ready there).
+#[derive(Clone)]
+struct MeshCounts {
+    at: usize,
+    chain: Vec<(usize, usize)>,
+    m0: Value,
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Tests set [`mesh_counts_mode`] for their own thread.
+    pub(super) static MESH_COUNTS_TEST: std::cell::Cell<Option<u8>> = const { std::cell::Cell::new(None) };
+}
+
+/// `VICTORY_MESH_COUNTS`: 0 off (unset), 1 on, 2 on and say per program why
+/// (`why`).
+fn mesh_counts_mode() -> u8 {
+    #[cfg(test)]
+    if let Some(mode) = MESH_COUNTS_TEST.get() {
+        return mode;
+    }
+    static MODE: std::sync::OnceLock<u8> = std::sync::OnceLock::new();
+    *MODE.get_or_init(|| match std::env::var("VICTORY_MESH_COUNTS").as_deref() {
+        Ok("1") => 1,
+        Ok("why") => 2,
+        _ => 0,
+    })
+}
+
 /// The f16 bits of inline float constant `c` (240..=248: 0.5, -0.5, 1.0,
 /// -1.0, 2.0, -2.0, 4.0, -4.0, 1/(2 pi)).
 fn inline_f16(c: u8) -> u32 {
@@ -227,6 +260,10 @@ struct Lower<'a> {
     console_lanes: bool,
     /// Mesh: the thread index in the group (made in the entry block).
     flat: Option<V>,
+    /// Mesh, `VICTORY_MESH_COUNTS`: where the program's own output counts are set
+    /// ([`Lower::plan_mesh_counts`]), and once set, the counts (vertices, primitives).
+    mesh_counts: Option<MeshCounts>,
+    mesh_live: Option<(V, V)>,
     /// Mesh: IR blocks whose `s_barrier` is left out.
     no_barrier: HashSet<usize>,
     /// IR blocks whose `s_barrier` not every lane is sure to reach (a lane
@@ -1522,6 +1559,8 @@ impl<'a> Lower<'a> {
             halves,
             wave_base: None,
             flat: None,
+            mesh_counts: None,
+            mesh_live: None,
             no_barrier,
             fence_only,
             half_outputs: half_outputs(&x.native.io, &x.outputs),
@@ -2053,6 +2092,9 @@ impl<'a> Lower<'a> {
         self.cur = self.s.entry;
         self.find_sections();
         self.inputs()?;
+        if self.s.mesh.is_some() && mesh_counts_mode() > 0 {
+            self.mesh_counts = self.plan_mesh_counts(&order);
+        }
         if let Some(mesh) = self.s.mesh {
             self.mesh_prologue(mesh).map_err(|w| unsupported(0, w))?;
             self.block[order[0]] = Some(self.cur);
@@ -2100,6 +2142,9 @@ impl<'a> Lower<'a> {
                 i += 1;
             }
             self.mask_ok = self.mask_data == MaskData::Console;
+            if self.mesh_counts.as_ref().is_some_and(|m| m.at == b) {
+                self.emit_mesh_counts().map_err(|w| unsupported(p.blocks[b].offset, w))?;
+            }
             if self.lds_meet.as_ref().is_some_and(|(_, meet)| meet[b].1) {
                 self.lds_meeting();
             }
@@ -4023,6 +4068,10 @@ impl<'a> Lower<'a> {
             }
             self.s.mesh = Some(mesh);
         }
+        if self.mesh_counts.is_some() {
+            // Set where the program sends its own counts ([`Lower::emit_mesh_counts`]).
+            return Ok(());
+        }
         let e = self.s.entry;
         let void = self.s.t.void;
         let (v, p) = (
@@ -4031,6 +4080,13 @@ impl<'a> Lower<'a> {
         );
         self.s
             .op(e, "setMeshOutputCounts", Attr::NoUnwind, void, 168, &[v, p]);
+        self.cull_primitives(mesh, threads, p)
+    }
+
+    /// Mesh: every primitive of the declared count starts culled; see
+    /// [`Lower::mesh_prologue`]. `p` is the count set.
+    fn cull_primitives(&mut self, mesh: super::shader::Mesh, threads: u32, p: V) -> Result<(), Why> {
+        let void = self.s.t.void;
         let flat = self.mesh_thread();
         let z = self.s.m.i32(0);
         // Every primitive of the declared count starts culled, also those
@@ -4046,7 +4102,7 @@ impl<'a> Lower<'a> {
                 let past = self.s.m.i32(pass * threads);
                 self.s.m.bin(self.cur, Bin::Add, flat, past)
             };
-            let guard = ((pass + 1) * threads > mesh.max_primitives)
+            let guard = ((pass + 1) * threads > mesh.max_primitives || self.mesh_live.is_some())
                 .then(|| self.s.m.cmp(self.cur, pred::IULT, index, p));
             let at = self.begin_guarded(guard);
             self.s.op(
@@ -4079,6 +4135,182 @@ impl<'a> Lower<'a> {
         );
         self.flat = Some(f);
         f
+    }
+
+    /// Mesh, `VICTORY_MESH_COUNTS`: where the program's own output counts can be
+    /// set for every thread at once, or `None` (the declared maxima, as before).
+    /// The allocation request runs in one lane, but its m0 is usually made by
+    /// a few scalar instructions from values every lane already has. Taken:
+    /// one request; its m0 made by pure scalar instructions (no SCC, EXEC or
+    /// vector reads); a block that every lane runs, that every path from the
+    /// entry to the end passes, that is in no loop, that holds no export and
+    /// comes before every export, and after the values those instructions
+    /// read.
+    /// shortcut: assumes the counts are the same in every console wave of a
+    /// group (the request is one wave's); a group of several waves whose
+    /// counts differ would set different counts per wave.
+    fn plan_mesh_counts(&self, order: &[usize]) -> Option<MeshCounts> {
+        let p = self.x.p;
+        let why = mesh_counts_mode() == 2;
+        let skip = |reason: &str| {
+            if why {
+                eprintln!("MESH-COUNTS skipped: {reason}");
+            }
+            None
+        };
+        let mut sites = Vec::new();
+        for (b, block) in p.blocks.iter().enumerate() {
+            for (i, inst) in block.insts.iter().enumerate() {
+                if inst.name() == "s_sendmsg" && matches!(inst.fields, Fields::Sopp { imm } if imm & 0xF == GS_ALLOC_REQ) {
+                    sites.push((b, i));
+                }
+            }
+        }
+        let [(a, ai)] = sites[..] else {
+            return skip(&format!("{} allocation requests", sites.len()));
+        };
+        let Some(m0) = p.blocks[a].insts[ai].read(Reg::S(crate::ir::M0)) else {
+            return skip("no m0 at the request");
+        };
+        let mut def: HashMap<Value, (usize, usize)> = HashMap::new();
+        let mut phi_at: HashMap<Value, usize> = HashMap::new();
+        for (b, block) in p.blocks.iter().enumerate() {
+            for phi in &block.phis {
+                phi_at.insert(phi.value, b);
+            }
+            for (i, inst) in block.insts.iter().enumerate() {
+                for w in &inst.writes {
+                    def.insert(w.1, (b, i));
+                }
+            }
+        }
+        const PURE: [&str; 10] = [
+            "s_mov_b32", "s_or_b32", "s_and_b32", "s_lshl_b32", "s_lshr_b32",
+            "s_add_u32", "s_add_i32", "s_bfe_u32", "s_min_u32", "s_max_u32",
+        ];
+        // The instructions that make m0, and the blocks of what they read.
+        let mut chain: Vec<(usize, usize)> = Vec::new();
+        let mut leaves: Vec<usize> = Vec::new();
+        let mut work = vec![m0];
+        let mut seen = HashSet::new();
+        while let Some(v) = work.pop() {
+            if !seen.insert(v) {
+                continue;
+            }
+            match (def.get(&v), phi_at.get(&v)) {
+                (Some(&(b, i)), _) => {
+                    let inst = &p.blocks[b].insts[i];
+                    let pure = matches!(inst.fields, Fields::Sop { .. }) && PURE.contains(&inst.name());
+                    let in_lane_region = b == a || !self.all_lanes(b);
+                    if pure && in_lane_region {
+                        if chain.len() >= 16 {
+                            return skip("m0 made by too many instructions");
+                        }
+                        if inst.reads.iter().any(|r| matches!(r.0, Reg::Scc | Reg::V(_)) || r.0 == Reg::S(EXEC) || r.0 == Reg::S(EXEC + 1)) {
+                            return skip("m0 made from SCC, EXEC or a vector register");
+                        }
+                        chain.push((b, i));
+                        work.extend(inst.reads.iter().map(|r| r.1));
+                    } else {
+                        leaves.push(b);
+                    }
+                }
+                (None, Some(&b)) => leaves.push(b),
+                (None, None) => leaves.push(order[0]),
+            }
+        }
+        let mut index = vec![usize::MAX; p.blocks.len()];
+        for (n, &b) in order.iter().enumerate() {
+            index[b] = n;
+        }
+        let idom = crate::ir::idoms(&p.blocks, order, &index);
+        let dominates = |x: usize, mut y: usize| loop {
+            if y == x {
+                break true;
+            }
+            if idom[y] == y || idom[y] == usize::MAX {
+                break false;
+            }
+            y = idom[y];
+        };
+        let exports: Vec<usize> = (0..p.blocks.len())
+            .filter(|&b| p.blocks[b].insts.iter().any(|i| matches!(i.fields, Fields::Exp { .. })))
+            .collect();
+        // Blocks reachable from `from` without passing `avoid`.
+        let reach = |from: &[usize], avoid: usize| {
+            let mut seen = vec![false; p.blocks.len()];
+            let mut work: Vec<usize> = from.to_vec();
+            while let Some(b) = work.pop() {
+                if b == avoid || seen[b] {
+                    continue;
+                }
+                seen[b] = true;
+                work.extend(p.blocks[b].exit.successors());
+            }
+            seen
+        };
+        let mut d = a;
+        loop {
+            if idom[d] == d || idom[d] == usize::MAX {
+                return skip("no block every lane runs before the request and the exports");
+            }
+            d = idom[d];
+            let fits = self.all_lanes(d)
+                && !exports.contains(&d)
+                && exports.iter().all(|&x| dominates(d, x))
+                && leaves.iter().all(|&l| dominates(l, d))
+                && !reach(&p.blocks[d].exit.successors(), usize::MAX)[d]
+                && {
+                    // every way to the end passes d
+                    let from_entry = reach(&[order[0]], d);
+                    !(0..p.blocks.len()).any(|b| {
+                        from_entry[b] && matches!(p.blocks[b].exit, Exit::End | Exit::Indirect)
+                    })
+                };
+            if fits {
+                break;
+            }
+        }
+        chain.sort_by_key(|&(b, i)| (index[b], i));
+        if why {
+            eprintln!(
+                "MESH-COUNTS applied: counts set at code offset {:#x} from {} scalar instructions",
+                p.blocks[d].offset,
+                chain.len()
+            );
+        }
+        Some(MeshCounts { at: d, chain, m0 })
+    }
+
+    /// Mesh, `VICTORY_MESH_COUNTS`: at the end of the planned block, the
+    /// program's own counts (clamped to the declared maxima), then every
+    /// primitive below the count starts culled as in [`Lower::mesh_prologue`].
+    fn emit_mesh_counts(&mut self) -> Result<(), Why> {
+        let plan = self.mesh_counts.clone().ok_or("no mesh counts planned")?;
+        let p = self.x.p;
+        for &(b, i) in &plan.chain {
+            self.sop(&p.blocks[b].insts[i])?;
+        }
+        let m0 = self.i32_of(plan.m0)?;
+        let mesh = self.s.mesh.ok_or("not a mesh program")?;
+        let threads = self.s.threads.ok_or("mesh without threads")?[0];
+        let c = self.cur;
+        let (mask, twelve) = (self.s.m.i32(0xFFF), self.s.m.i32(12));
+        let verts = self.s.m.bin(c, Bin::And, m0, mask);
+        let prims = self.s.m.bin(c, Bin::LShr, m0, twelve);
+        let prims = self.s.m.bin(c, Bin::And, prims, mask);
+        let clamp = |l: &mut Self, x: V, most: u32| {
+            let most = l.s.m.i32(most);
+            let below = l.s.m.cmp(c, pred::IULT, x, most);
+            l.s.m.select(c, below, x, most)
+        };
+        let verts = clamp(self, verts, mesh.max_vertices);
+        let prims = clamp(self, prims, mesh.max_primitives);
+        let void = self.s.t.void;
+        self.s
+            .op(c, "setMeshOutputCounts", Attr::NoUnwind, void, 168, &[verts, prims]);
+        self.mesh_live = Some((verts, prims));
+        self.cull_primitives(mesh, threads, prims)
     }
 
     /// The console wave size.
@@ -10282,7 +10514,7 @@ impl<'a> Lower<'a> {
                 0
             };
             let threads = self.s.threads.map(|t| t[0]).unwrap_or(u32::MAX);
-            let mesh_guard = if limit > 0 && threads > limit {
+            let mut mesh_guard = if limit > 0 && threads > limit {
                 let lim = self.s.m.i32(limit);
                 let in_bounds = self.s.m.cmp(self.cur, pred::IULT, flat, lim);
                 match guard {
@@ -10292,6 +10524,15 @@ impl<'a> Lower<'a> {
             } else {
                 guard
             };
+            // With the program's own counts: nothing past them is written.
+            if let Some((verts, prims)) = self.mesh_live {
+                let count = if primitive { prims } else { verts };
+                let in_bounds = self.s.m.cmp(self.cur, pred::IULT, flat, count);
+                mesh_guard = Some(match mesh_guard {
+                    Some(g) => self.s.m.bin(self.cur, Bin::And, g, in_bounds),
+                    None => in_bounds,
+                });
+            }
             self.begin_guarded(mesh_guard)
         } else {
             None
@@ -10373,6 +10614,16 @@ impl<'a> Lower<'a> {
         } else {
             guard
         };
+        let guard = match self.mesh_live {
+            Some((_, prims)) => {
+                let in_bounds = self.s.m.cmp(self.cur, pred::IULT, flat, prims);
+                Some(match guard {
+                    Some(g) => self.s.m.bin(self.cur, Bin::And, g, in_bounds),
+                    None => in_bounds,
+                })
+            }
+            None => guard,
+        };
         let at = self.begin_guarded(guard);
         let c = self.cur;
         let z = self.s.m.i32(0);
@@ -10392,6 +10643,10 @@ impl<'a> Lower<'a> {
             if let Some(n) = written {
                 let n = self.s.m.i32(n);
                 let past = self.s.m.cmp(c, pred::IUGE, i, n);
+                culled = self.s.m.bin(c, Bin::Or, culled, past);
+            }
+            if let Some((verts, _)) = self.mesh_live {
+                let past = self.s.m.cmp(c, pred::IUGE, i, verts);
                 culled = self.s.m.bin(c, Bin::Or, culled, past);
             }
             *slot = i;

@@ -884,6 +884,70 @@ mod tests {
         }
     }
 
+    /// A wave64 mesh program of our own: lane 0 sends the output counts (3
+    /// vertices, 1 primitive, made by scalar instructions every lane runs),
+    /// then every lane exports a position and a primitive.
+    fn mesh_with_counts(mode: Option<u8>) -> Result<(), ShaderError> {
+        let words: [u32; 25] = [
+            0xD765_0000, 0x0001_00C1, // v_mbcnt_lo_u32_b32 v0, -1, 0
+            0xD766_0000, 0x0002_00C1, // v_mbcnt_hi_u32_b32 v0, -1, v0
+            0x7E04_0505, // v_readfirstlane_b32 s2, v5 (the group input)
+            0x7E02_0280, // v_mov_b32 v1, 0
+            0x7E04_0280, // v_mov_b32 v2, 0
+            0x7E06_0280, // v_mov_b32 v3, 0
+            0x7E08_0280, // v_mov_b32 v4, 0
+            0x7E0C_0280, // v_mov_b32 v6, 0
+            0xBE86_0383, // s_mov_b32 s6, 3
+            0xBE87_0381, // s_mov_b32 s7, 1
+            0x8F07_8C07, // s_lshl_b32 s7, s7, 12
+            0x8806_0607, // s_or_b32 s6, s7, s6
+            0xBE80_047E, // s_mov_b64 s[0:1], exec
+            0x7DA4_0080, // v_cmpx_eq_u32 exec, 0, v0
+            0xBF88_0002, // s_cbranch_execz past the request
+            0xBEFC_0306, // s_mov_b32 m0, s6
+            0xBF90_0009, // s_sendmsg GS_ALLOC_REQ
+            0xBEFE_0400, // s_mov_b64 exec, s[0:1]
+            0xF800_08CF, 0x0403_0201, // exp pos0, v1, v2, v3, v4 done
+            0xF800_0941, 0x0000_0006, // exp prim, v6 done
+            0xBF81_0000, // s_endpgm
+        ];
+        let native = NativeProgram {
+            stage: HwStage::Ms,
+            wave64: true,
+            vgprs: 8,
+            layout: vec![],
+            used: vec![],
+            io: StageIo::Ms(crate::native::MeshIo {
+                outputs: vec![],
+                clip_cntl: 0,
+                threads: 64,
+                max_vertices: 64,
+                max_primitives: 64,
+                topology: 2,
+                lds_bytes: 0,
+            }),
+            code: words.iter().flat_map(|w| w.to_le_bytes()).collect(),
+        };
+        lower::MESH_COUNTS_TEST.set(mode);
+        let p = ir::build(&native.patched_code(), native.wave64, native.vgprs).unwrap();
+        let res = resource::track(&p, &native.layout, native.stage, None).unwrap();
+        let io = io::raise(&p, &native).unwrap();
+        let st = structure::structure(&p).unwrap();
+        let container = crate::dxbc::build(&[]);
+        let c = Container::parse(&container).unwrap();
+        let out = emit(&c, &native, &p, &st, &io, &res).map(|_| ());
+        lower::MESH_COUNTS_TEST.set(None);
+        out
+    }
+
+    /// The program's own counts (`VICTORY_MESH_COUNTS`) translate where the
+    /// declared maxima do.
+    #[test]
+    fn mesh_counts_of_the_program_translate() {
+        assert_eq!(mesh_with_counts(Some(0)).map_err(|e| e.to_string()), Ok(()), "declared maxima");
+        assert_eq!(mesh_with_counts(Some(2)).map_err(|e| e.to_string()), Ok(()), "own counts");
+    }
+
     /// A wave64 compute program: `body`, then a store of v1 to a UAV.
     fn stores_v1(body: &[u32]) -> Result<(), ShaderError> {
         use crate::native::RootParam;

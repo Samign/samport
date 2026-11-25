@@ -88,6 +88,7 @@ powershell -ExecutionPolicy Bypass -File scripts\debug.ps1 -Game "<your game fol
 | `-TextureIdleMS N` / `VICTORY_TEXTURE_IDLE_MS` | **1000 in both scripts**: how long an unused texture copy is kept on the card (default 5000, at least 250): shorter frees VRAM for textures still waiting |
 | `-DisplayMode 1920x1080` / `VICTORY_DISPLAY_MODE` | **default in both scripts** (`-DisplayMode 3840x2160` for the layer's own): the TV size the console reports (layer default 3840x2160). If the game renders for the mode it is given, smaller means less GPU work and smaller render targets |
 | `-Console series-s` | the game believes it runs on an Xbox Series S (`--console series-s`). **Does not work yet**: in that mode the game loads `amd_fidelityfx_upscaler_xbox.dll`, which the host policy refuses, and it stays on a black screen (11 draws a frame) |
+| `-MeshCounts 1` / `VICTORY_MESH_COUNTS=1` (`why`: also print per shader) | experimental: a mesh shader declares the vertex and primitive counts the game asks for (its allocation request), where that can be done for all threads at once, instead of the declared maxima with the rest culled one by one; part of the shader cache key |
 | `VICTORY_CARD_BUFFERS_MB=0` | keeps the game's large buffers out of card memory (more room for textures, likely slower) |
 
 A failed DirectStorage write into physical pages now says why (an unknown page,
@@ -156,6 +157,10 @@ or a view that could not be mapped or committed).
   ray-traversal programs were not among the top in this scene.
 - `-Console series-s`: black screen; the game asks for AMD's FidelityFX upscaler DLL, refused
   by the host policy. Series X stays the default.
+- The heaviest mesh program (`db875f50a166bd91`, ~390 draws a frame) is small (224
+  instructions); its translation declares 128 vertices and primitives per group and culls the
+  unused ones, which `-MeshCounts` replaces with the game's own counts. PIX could not launch
+  the layer ("unspecified error").
 - Shaders saved with `VICTORY_SHADER_SAVE=<dir>` for study must stay outside
   the repository (docs/asset-policy.md).
 
