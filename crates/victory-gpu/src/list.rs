@@ -1515,7 +1515,13 @@ mod state {
     }
 
     pub(super) extern "system" fn topology(this: This, topology: u32) {
-        with_state(this, |list, s| s.set_topology(list, topology));
+        // The same topology again records nothing: merged draws waiting stay.
+        with_state_keep(this, |list, s| {
+            if !s.topology_is(topology) {
+                s.flush_merge(list);
+            }
+            s.set_topology(list, topology)
+        });
     }
     pub(super) extern "system" fn viewports(
         this: This,

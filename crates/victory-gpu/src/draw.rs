@@ -433,6 +433,11 @@ impl State {
     /// one indirect execution over records assembled on the card, or the
     /// draws one by one where that cannot be made. Called before anything
     /// else is recorded on the list.
+    /// Whether the title's topology is `topology` already.
+    pub(crate) fn topology_is(&self, topology: u32) -> bool {
+        self.topology_set && self.topology == topology
+    }
+
     /// Whether merged draws wait ([`State::flush_merge`]).
     pub(crate) fn has_pending(&self) -> bool {
         self.pending.is_some()
@@ -2851,19 +2856,15 @@ fn merge_signature(root: &ID3D12RootSignature, layout: &[(u8, u32, u32)]) -> Opt
     Some((sig, stride))
 }
 
-/// A draw's captured arguments in the order a merged record holds them
-/// (root views first: their 8 bytes stay 8-aligned), and its layout.
+/// A draw's captured arguments in the order a merged record holds them (by
+/// root parameter, ascending, as a command signature must list them), and
+/// its layout.
 fn ordered(capt: &[Capt]) -> (Vec<&Capt>, Vec<(u8, u32, u32)>) {
-    let mut views: Vec<&Capt> = capt.iter().filter(|c| !matches!(c, Capt::Constants(..))).collect();
-    views.sort_by_key(|c| match c {
+    let mut all: Vec<&Capt> = capt.iter().collect();
+    all.sort_by_key(|c| match c {
         Capt::Cbv(p, _) | Capt::Srv(p, _) | Capt::Constants(p, _) => *p,
     });
-    let mut consts: Vec<&Capt> = capt.iter().filter(|c| matches!(c, Capt::Constants(..))).collect();
-    consts.sort_by_key(|c| match c {
-        Capt::Cbv(p, _) | Capt::Srv(p, _) | Capt::Constants(p, _) => *p,
-    });
-    views.extend(consts);
-    let layout = views
+    let layout = all
         .iter()
         .map(|c| match c {
             Capt::Constants(p, v) => (0, *p, v.len() as u32),
@@ -2871,7 +2872,7 @@ fn ordered(capt: &[Capt]) -> (Vec<&Capt>, Vec<(u8, u32, u32)>) {
             Capt::Srv(p, _) => (2, *p, 2),
         })
         .collect();
-    (views, layout)
+    (all, layout)
 }
 
 /// Sets a captured argument on the list (a batch of one).

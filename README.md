@@ -179,6 +179,12 @@ or a view that could not be mapped or committed).
   the binding model, not a patch. The counters are in diagnostics builds only.
   Correction: the title's tables reach host shaders as root constants (heap offsets), not
   as tables, so per-record root constants and views are enough: `-MeshMerge` does that.
+- `-MeshMerge` first run: batches formed, but the driver refused the merged command signature
+  (E_INVALIDARG): root arguments must be listed by ascending root parameter. Fixed. Batches
+  ended mostly at a pipeline change (~365 a frame), a new window (~96) and a topology call
+  (~52, now kept when the topology is the same).
+- With the active-uniform fix the structure builder runs (53 of 53 programs) without
+  `-FirstLaneLocal`.
 - Shaders saved with `VICTORY_SHADER_SAVE=<dir>` for study must stay outside
   the repository (docs/asset-policy.md).
 
