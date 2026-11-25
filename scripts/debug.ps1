@@ -16,7 +16,8 @@
 #   ... -InPlaceProbe                  # ask the driver what in-place memory it accepts (logs "in place probe")
 #   ... -GpuTiming                     # rank GPU time by pipeline ("the card's time by command"); frames get slower
 #   ... -GpuTiming -BarrierTest indirect   # TIMING ONLY: how much the ~12,000 GPU waits around indirect commands cost
-#   ... -CardBuffersMinMB 1 -CardBuffersMB 1024   # the card, not the CPU, looks for shader writes in buffers of 1 MiB+ (uses VRAM)
+#   ... -CardBuffersMinMB 16 -CardBuffersMB 512   # the layer's own defaults (the script uses 1 / 1024: the card compares buffers of 1 MiB+)
+#   ... -IndirectWindow                # clamp runs of the game's mesh draw records in one pass instead of one pass per draw
 #   ... -NoFast                        # turn off overlap (on by default: VICTORY_RELAY=2, the card works while the CPU prepares)
 #   ... -SaveShaders "$env:TEMP\ztrx-shaders"   # keep the game's shaders for study (never inside the repo)
 #   ... -Builder -WaveWhy -WaveWide    # same, plus the risky two-host-wave form (can hang the GPU)
@@ -35,8 +36,9 @@ param(
     [switch]$Fast,                                    # kept for old command lines: overlap is on by default
     [switch]$NoFast,
     [switch]$NoWideBack,                              # snapshots/compares of shader writes on several threads is on by default
-    [int]$CardBuffersMinMB = 0,                       # VICTORY_CARD_BUFFERS_MIN_MB: smallest buffer whose copy lives in card memory (default 16)
-    [int]$CardBuffersMB = 0,                          # VICTORY_CARD_BUFFERS_MB: most bytes of such copies (default 512)
+    [int]$CardBuffersMinMB = 1,                       # VICTORY_CARD_BUFFERS_MIN_MB: smallest buffer whose copy lives in card memory (layer default 16)
+    [int]$CardBuffersMB = 1024,                       # VICTORY_CARD_BUFFERS_MB: most bytes of such copies (layer default 512)
+    [switch]$IndirectWindow,                          # VICTORY_INDIRECT_WINDOW=1: clamp runs of mesh records in one pass
     [switch]$FirstLaneLocal,
     [switch]$NoQuarantine,
     [switch]$NamedWrites,
@@ -58,7 +60,7 @@ foreach ($v in "VICTORY_KEYS", "VICTORY_CAPTURE", "VICTORY_CAPTURE_FRAMES", "VIC
                "VICTORY_WAVE_WHY", "VICTORY_WAVE_WIDE", "VICTORY_FIRSTLANE_LOCAL", "VICTORY_MEMORY_WRITES",
                "VICTORY_INPLACE", "VICTORY_INPLACE_MB", "VICTORY_INPLACE_PROBE",
                "VICTORY_GPU_TIMING", "VICTORY_D3D12_DRED", "VICTORY_BARRIER_TEST", "VICTORY_SHADER_SAVE",
-               "VICTORY_CARD_BUFFERS_MIN_MB", "VICTORY_CARD_BUFFERS_MB") {
+               "VICTORY_CARD_BUFFERS_MIN_MB", "VICTORY_CARD_BUFFERS_MB", "VICTORY_INDIRECT_WINDOW") {
     Remove-Item "Env:$v" -ErrorAction SilentlyContinue
 }
 New-Item -ItemType Directory -Force $Cache, $Data | Out-Null
@@ -101,6 +103,7 @@ if ($Fast)     { $env:VICTORY_RELAY = "2" }
 if (-not $NoWideBack) { $env:VICTORY_WIDE_BACK = "1" }
 if ($CardBuffersMinMB -gt 0) { $env:VICTORY_CARD_BUFFERS_MIN_MB = "$CardBuffersMinMB" }
 if ($CardBuffersMB -gt 0)    { $env:VICTORY_CARD_BUFFERS_MB = "$CardBuffersMB" }
+if ($IndirectWindow) { $env:VICTORY_INDIRECT_WINDOW = "1" }
 if ($TexturePct -gt 0)      { $env:VICTORY_TEXTURE_PCT = "$TexturePct" }
 if ($TextureBudgetMB -gt 0) { $env:VICTORY_TEXTURE_BUDGET_MB = "$TextureBudgetMB" }
 
@@ -119,7 +122,7 @@ if (-not $found) {
 }
 $Exe = (Resolve-Path $found).Path
 Write-Host "exe: $Exe`ncache: $Cache`nlog: $Log"
-Write-Host "builder=$([bool]$Builder) quarantine=$([bool]($Builder -and -not $NoQuarantine)) firstlane=$([bool]$FirstLaneLocal) namedwrites=$([bool]$NamedWrites) inplace=$InPlace gputiming=$([bool]$GpuTiming) barriertest=$BarrierTest wavewhy=$([bool]$WaveWhy) wavewide=$([bool]$WaveWide) fast=$([bool]$Fast) wideback=$(-not $NoWideBack) cardmin=$CardBuffersMinMB texpct=$TexturePct texbudget=$TextureBudgetMB"
+Write-Host "builder=$([bool]$Builder) quarantine=$([bool]($Builder -and -not $NoQuarantine)) firstlane=$([bool]$FirstLaneLocal) namedwrites=$([bool]$NamedWrites) inplace=$InPlace gputiming=$([bool]$GpuTiming) barriertest=$BarrierTest wavewhy=$([bool]$WaveWhy) wavewide=$([bool]$WaveWide) fast=$([bool]$Fast) wideback=$(-not $NoWideBack) cardmin=$CardBuffersMinMB indirectwindow=$([bool]$IndirectWindow) texpct=$TexturePct texbudget=$TextureBudgetMB"
 
 # (A first "NativeCommandError" line in the log is only PowerShell wrapping stderr; harmless.)
 $env:NO_COLOR = "1"

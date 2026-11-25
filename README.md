@@ -77,7 +77,8 @@ powershell -ExecutionPolicy Bypass -File scripts\debug.ps1 -Game "<your game fol
 | `-WaveWhy` / `VICTORY_WAVE_WHY=1` | prints why each 64-lane retry fails (`WAVE64-RETRY`); part of the shader cache key |
 | overlap / `VICTORY_RELAY=2` | **default in `play.ps1` (`-Relay 0` off) and `debug.ps1` (`-NoFast` off)**: the card runs a submission while the CPU prepares the next |
 | `VICTORY_WIDE_BACK=1` | **default in both scripts** (`-WideBack 0` / `-NoWideBack` off): snapshots and compares of shader-written ranges run on several threads |
-| `-CardBuffersMinMB 1 -CardBuffersMB 1024` | the card, not the CPU, looks for shader writes in buffers of 1 MiB or more; uses VRAM that textures also need |
+| `-CardBuffersMinMB 1 -CardBuffersMB 1024` | **default in both scripts**: the card, not the CPU, looks for shader writes in buffers of 1 MiB or more (layer defaults 16 / 512). Uses ~940 MB of VRAM instead of ~490 MB |
+| `-IndirectWindow` / `VICTORY_INDIRECT_WINDOW=1` | in the code, off by default: the game draws its mesh records one per call from consecutive slots; this clamps up to 64 of them in one pass, instead of a compute pass between two waits before every draw |
 | `-InPlace 1` / `VICTORY_INPLACE=1` | **default in `play.ps1` and `debug.ps1`** (`-InPlace 0` turns it off). Zero-copy (in the code upstream, off by default there): game memory outside buffers is opened as a host heap the card reads directly, instead of being copied (~6.4 GB of copies in a builder run). Locks up to `VICTORY_INPLACE_MB` (4096) of it into RAM. A `title memory in place` line every 10 s says what was placed and what was turned down |
 | `-InPlace 2` | also the game's buffers (not the big ones in card memory). Turns overlap off (not compatible with late wait) |
 | `-InPlaceProbe` / `VICTORY_INPLACE_PROBE=1` | asks the driver what it accepts in place; logs `in place probe` lines |
@@ -130,6 +131,8 @@ or a view that could not be mapped or committed).
 - Defaults (`-InPlace 1` + overlap): 290-400 ms a frame (2.5-3.5 fps), GPU ~138 ms, card ~78%
   busy; the CPU still snapshots and compares ~350 MB of buffer copies a frame on one
   thread, which `VICTORY_WIDE_BACK=1` (now default) spreads over several.
+- Card-side compares (`-CardBuffersMinMB 1 -CardBuffersMB 1024`, now default): CPU snapshots
+  413 MB -> 26 MB a frame, copy-back ~314 -> ~168 ms, 290-410 ms a frame (2.4-3.5 fps).
 - Shaders saved with `VICTORY_SHADER_SAVE=<dir>` for study must stay outside
   the repository (docs/asset-policy.md).
 
