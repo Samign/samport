@@ -1423,7 +1423,7 @@ pub(crate) fn room() -> bool {
 /// - only the host copy holds the host texture: no descriptor slot views
 ///   it (a slot keeps what it views, `HostHeap::kept`), so no shader can
 ///   read it through a slot made earlier, by a table or by an index;
-/// - nothing asked for it for `IDLE_MS` and `IDLE_FRAMES` frames.
+/// - nothing asked for it for `VICTORY_TEXTURE_IDLE_MS` (5,000 ms) and `IDLE_FRAMES` frames.
 ///
 /// The next use makes the host copy anew and uploads the title's memory
 /// again (its staging state goes with it). The title resource stays: its
@@ -1437,7 +1437,16 @@ pub(crate) fn room() -> bool {
 #[cfg(windows)]
 pub(crate) fn let_go_idle() {
     use std::sync::atomic::Ordering::Relaxed;
-    const IDLE_MS: u64 = 5_000;
+    // `VICTORY_TEXTURE_IDLE_MS` (default 5000, at least 250): how long a copy
+    // nothing names is kept. Shorter gives card memory back sooner, for
+    // textures still waiting, at the cost of uploading again on reuse.
+    static IDLE: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    let idle_ms = *IDLE.get_or_init(|| {
+        std::env::var("VICTORY_TEXTURE_IDLE_MS")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .map_or(5_000, |ms| ms.max(250))
+    });
     const IDLE_FRAMES: u64 = 4;
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     if !*ON.get_or_init(|| std::env::var_os("VICTORY_TEXTURE_SWEEP").is_none_or(|v| v != "0")) {
@@ -1457,7 +1466,7 @@ pub(crate) fn let_go_idle() {
         let gone = {
             let mut made = r.host.made.lock().unwrap_or_else(|e| e.into_inner());
             let idle = made.as_ref().is_some_and(|(host, _)| {
-                crate::host::long_ago(r.host.used.load(Relaxed), IDLE_MS, IDLE_FRAMES)
+                crate::host::long_ago(r.host.used.load(Relaxed), idle_ms, IDLE_FRAMES)
                     && std::sync::Arc::strong_count(host) == 1
                     && crate::host::references(&host.texture) == 1
             });

@@ -85,6 +85,7 @@ powershell -ExecutionPolicy Bypass -File scripts\debug.ps1 -Game "<your game fol
 | `-GpuTiming` / `VICTORY_GPU_TIMING=1 VICTORY_D3D12_DRED=1` | times every command on the card and ranks them by pipeline (`the card's time by command`); runs slower |
 | `-BarrierTest indirect` / `VICTORY_BARRIER_TEST` | timing only: leaves out GPU waits (`indirect`, `groups`, `both`) to measure what they cost; may glitch |
 | `-SaveShaders <dir>` / `VICTORY_SHADER_SAVE` | saves each shader as given and as translated, by hash; the folder must be outside the repository |
+| `-TextureIdleMS N` / `VICTORY_TEXTURE_IDLE_MS` | how long an unused texture copy is kept on the card (default 5000, at least 250): shorter frees VRAM for textures still waiting |
 | `VICTORY_CARD_BUFFERS_MB=0` | keeps the game's large buffers out of card memory (more room for textures, likely slower) |
 
 A failed DirectStorage write into physical pages now says why (an unknown page,
@@ -136,6 +137,12 @@ or a view that could not be mapped or committed).
 - Indirect window: clamp passes ~6,400 -> ~1,900 a frame, **~220 ms a frame (4.5 fps)**, card
   ~82% busy. In the same run card memory was full (7,005 of 7,062 MB, card copies 941 MB) and
   textures stopped uploading (black shirt, missing items): the card-copy cap is back at 512 MB.
+- With the cap at 512 MB the card was still full (~6.7 of ~7.0 GB): host textures ~5.3 GB, of
+  which ~2.2 GB are copies of game textures and ~3.1 GB the game's own render targets, which
+  cannot be let go. The shirt stayed missing, and frames went back to ~380-415 ms: the 1024 MB
+  cap was also part of the 4.5 fps result. On 8 GB this is a trade of speed against textures.
+- Rooms stay dark: indoor light comes from the ray-traced lighting, which needs the structure
+  builder (still quarantined); only the prebuilt static structures are traversed today.
 - Shaders saved with `VICTORY_SHADER_SAVE=<dir>` for study must stay outside
   the repository (docs/asset-policy.md).
 
