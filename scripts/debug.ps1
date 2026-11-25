@@ -87,7 +87,8 @@ $env:VICTORY_LOG       = $Filter
 if ($Builder)  { $env:VICTORY_BVH_BUILDER = "1"; if (-not $NoQuarantine) { $env:VICTORY_BVH_QUARANTINE = "1" } }
 if ($BvhApprox) { $env:VICTORY_BVH_APPROX = "1" }
 if ($BvhNullViews) { $env:VICTORY_BVH_NULL_VIEWS = "1" }
-# -BvhWriteBack N (with -Builder -NoQuarantine): only the first N builder stages copy their stores back
+# -BvhWriteBack N (with -Builder -NoQuarantine): only the first N builder stages copy their stores back.
+# Quarantine (and -BvhWriteBack) only holds back copies: with -InPlace 1 the card writes title memory directly, so use -InPlace 0.
 if ($BvhWriteBack -ge 0) { $env:VICTORY_BVH_WRITEBACK = "$BvhWriteBack" }
 if ($WaveWhy)  { $env:VICTORY_WAVE_WHY = "1" }
 if ($WaveWide) { $env:VICTORY_WAVE_WIDE = "1" }

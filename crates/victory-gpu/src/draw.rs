@@ -69,6 +69,10 @@ thread_local! {
     /// While a dispatch is bound: whether a shader took the address of a
     /// buffer view that is not there ([`State::host_word`]).
     static MISSING_VIEW: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// While a stage's tables are walked: whether the pipeline is a
+    /// quarantined builder's ([`crate::pipeline::builder_quarantined`]):
+    /// what it stores through table views stays in the host's copies too.
+    static QUARANTINED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// Whether a builder stage that takes the address of a buffer view that is
@@ -1041,8 +1045,10 @@ impl State {
         for stage in &p.stages {
             let t = stage.translated();
             STORES.set(t.stores);
+            QUARANTINED.set(crate::pipeline::builder_quarantined(self.pipeline as This));
             let made = self.tables(list, &t.used, &t.host.root_indexed_views, compute);
             STORES.set(true);
+            QUARANTINED.set(false);
             if made.iter().any(|m| m.1 == u32::MAX) {
                 once!("a draw whose descriptor table found no free slots is dropped");
                 return false;
@@ -3132,7 +3138,11 @@ fn readable(list: &HostList, kind: ResourceType, view: &View) {
         if kind == ResourceType::Uav {
             // A shader that cannot store to buffers leaves the range as
             // the title has it: nothing to find afterwards.
-            if STORES.get() || !write_skip() {
+            // (a quarantined builder stage's stores through table views
+            // stayed out of title memory before only through root views:
+            // runs with VICTORY_BVH_WRITEBACK=0 still crashed)
+            if QUARANTINED.get() {
+            } else if STORES.get() || !write_skip() {
                 shadow.gpu_writes(list, address, len);
             } else {
                 #[cfg(feature = "diagnostics")]
