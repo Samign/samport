@@ -165,6 +165,10 @@ or a view that could not be mapped or committed).
   gain (~230-240 ms a frame, GPU ~153 ms, in a scene with ~6,000 draws against ~4,600 before).
   The game's mesh groups are probably mostly full. Left off by default. Card memory was over
   its budget in this run (7,177 of 6,885 MB), which costs speed too.
+- `-DisplayMode 1280x720`: no change from 1080p (~205-250 ms a frame, GPU ~145 ms, host
+  textures ~5.2 GB): below 1080p the game does not render smaller. 1080p stays the default.
+- Of ~2,600-4,500 indirect mesh draws a frame, none could join the one before as recorded:
+  there is always a title call between, and the state differs. What differs is logged next.
 - Shaders saved with `VICTORY_SHADER_SAVE=<dir>` for study must stay outside
   the repository (docs/asset-policy.md).
 

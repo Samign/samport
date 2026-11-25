@@ -182,7 +182,7 @@ pub(crate) struct State {
     /// the last indirect mesh draw: the call count at it, its state's hash,
     /// its argument copy and offset (for [`note_mergeable`]).
     pub(crate) calls: u64,
-    last_mesh: Option<(u64, u64, u64, u64)>,
+    last_mesh: Option<MeshSnap>,
     /// What the host list has: pipeline, root signature, heaps.
     host_pipeline: usize,
     /// Graphics, compute.
@@ -2449,28 +2449,41 @@ impl State {
             self.op_text(format!("indirect kind {kind} max {max} at {arguments:#x}"), kind == DISPATCH)
         });
         if kind == MESH {
-            use std::hash::{Hash, Hasher};
-            let mut h = std::collections::hash_map::DefaultHasher::new();
-            self.pipeline.hash(&mut h);
-            self.heaps.hash(&mut h);
-            self.graphics.hash(&mut h);
-            self.target_handles.hash(&mut h);
-            self.depth_handle.hash(&mut h);
-            for v in &self.viewports {
-                [v.TopLeftX, v.TopLeftY, v.Width, v.Height, v.MinDepth, v.MaxDepth].map(f32::to_bits).hash(&mut h);
-            }
-            for r in &self.scissors {
-                [r.left, r.top, r.right, r.bottom].hash(&mut h);
-            }
-            let hash = h.finish();
-            let (copy, at_args) = (args.id() as u64, offset);
-            let next = |&(_, _, c, o): &(u64, u64, u64, u64)| c == copy && at_args > o && at_args - o <= 256;
+            let view = {
+                use std::hash::{Hash, Hasher};
+                let mut h = std::collections::hash_map::DefaultHasher::new();
+                for v in &self.viewports {
+                    [v.TopLeftX, v.TopLeftY, v.Width, v.Height, v.MinDepth, v.MaxDepth].map(f32::to_bits).hash(&mut h);
+                }
+                for r in &self.scissors {
+                    [r.left, r.top, r.right, r.bottom].hash(&mut h);
+                }
+                h.finish()
+            };
+            let now = MeshSnap {
+                calls: self.calls,
+                copy: args.id() as u64,
+                offset,
+                pipeline: self.pipeline,
+                heaps: self.heaps,
+                graphics: self.graphics.clone(),
+                targets: (self.target_handles.clone(), self.depth_handle),
+                view,
+            };
             let (strict, loose) = match &self.last_mesh {
-                Some(last) if next(last) => (last.0 + 1 == self.calls, last.1 == hash),
+                Some(last) if last.copy == now.copy && now.offset > last.offset && now.offset - last.offset <= 256 => {
+                    note_diffs(last, &now);
+                    let same = last.pipeline == now.pipeline
+                        && last.heaps == now.heaps
+                        && last.graphics == now.graphics
+                        && last.targets == now.targets
+                        && last.view == now.view;
+                    (last.calls + 1 == now.calls, same)
+                }
                 _ => (false, false),
             };
             note_mergeable(strict, loose);
-            self.last_mesh = Some((self.calls, hash, copy, at_args));
+            self.last_mesh = Some(now);
             self.mesh_scissor(list, true);
         }
         // SAFETY: an open list with everything set; the scratch buffer and
@@ -2506,6 +2519,82 @@ impl State {
 /// call would save.
 static MERGE: [AtomicU64; 3] = [const { AtomicU64::new(0) }; 3];
 
+/// What an indirect mesh draw was given, to compare with the next one.
+#[derive(Default, Clone)]
+pub(crate) struct MeshSnap {
+    calls: u64,
+    copy: u64,
+    offset: u64,
+    pipeline: usize,
+    heaps: [usize; 2],
+    graphics: Vec<Root>,
+    targets: (Vec<u64>, u64),
+    view: u64,
+}
+
+/// Of the draws that read the next record after the one before: how many
+/// changed the pipeline, the heaps, the targets, the viewports or scissors;
+/// and per root slot (up to 16), how many changed it as a table, as
+/// constants, as a view.
+static DIFFS: [AtomicU64; 6] = [const { AtomicU64::new(0) }; 6];
+static SLOT_DIFFS: [[AtomicU64; 3]; 16] = [const { [const { AtomicU64::new(0) }; 3] }; 16];
+
+fn note_diffs(last: &MeshSnap, now: &MeshSnap) {
+    DIFFS[0].fetch_add(1, Ordering::Relaxed);
+    for (k, changed) in [
+        (1, last.pipeline != now.pipeline),
+        (2, last.heaps != now.heaps),
+        (3, last.targets != now.targets),
+        (4, last.view != now.view),
+    ] {
+        if changed {
+            DIFFS[k].fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    let n = last.graphics.len().max(now.graphics.len());
+    let mut any = false;
+    for slot in 0..n {
+        let (a, b) = (last.graphics.get(slot), now.graphics.get(slot));
+        if a == b {
+            continue;
+        }
+        any = true;
+        let kind = match b.or(a) {
+            Some(Root::Table(_)) => 0,
+            Some(Root::Constants(_)) => 1,
+            _ => 2,
+        };
+        if slot < 16 {
+            SLOT_DIFFS[slot][kind].fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    if any {
+        DIFFS[5].fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+fn say_diffs(frames: f64) {
+    let d: Vec<f64> = DIFFS.iter().map(|c| c.swap(0, Ordering::Relaxed) as f64 / frames).collect();
+    let mut slots = String::new();
+    for (slot, kinds) in SLOT_DIFFS.iter().enumerate() {
+        let k: Vec<u64> = kinds.iter().map(|c| c.swap(0, Ordering::Relaxed)).collect();
+        if k.iter().any(|&x| x > 0) {
+            use std::fmt::Write;
+            let _ = write!(
+                slots,
+                " slot {slot}: {:.0} table, {:.0} constants, {:.0} view;",
+                k[0] as f64 / frames,
+                k[1] as f64 / frames,
+                k[2] as f64 / frames
+            );
+        }
+    }
+    tracing::info!(
+        "indirect mesh draws reading the next record, per frame: {:.0}; changed since the draw before: pipeline {:.0}, heaps {:.0}, targets {:.0}, viewports or scissors {:.0}, root arguments {:.0} (by slot:{slots})",
+        d[0], d[1], d[2], d[3], d[4], d[5]
+    );
+}
+
 fn note_mergeable(strict: bool, loose: bool) {
     MERGE[0].fetch_add(1, Ordering::Relaxed);
     if strict {
@@ -2525,6 +2614,7 @@ fn note_mergeable(strict: bool, loose: bool) {
         tracing::info!(
             "indirect mesh draws per frame: {all:.0}; could join the one before: {strict:.0} with no title call between, {loose:.0} with the same state"
         );
+        say_diffs(frames);
     }
 }
 

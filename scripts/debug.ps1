@@ -146,7 +146,7 @@ $patterns = @(
     "builder", "host pipeline refused", "host mesh pipeline", "WAVE64-RETRY",
     "converter shader", "dropped .* without a host pipeline: ", "library saved",
     "ms/frame", "textures picked by index", "device removed", "ERROR",
-    "program without a host pipeline", "MESH-COUNTS", "indirect mesh draws per frame", "in place", "copystat: memory: ", "display mode reported", "depth texture with", "swap chain",  "time by command", "the card's clock", "dstorage", "black frame", "enables the", "buffer view", "constant buffer not", "does not translate"
+    "program without a host pipeline", "MESH-COUNTS", "indirect mesh draws per frame", "indirect mesh draws reading the next record", "in place", "copystat: memory: ", "display mode reported", "depth texture with", "swap chain",  "time by command", "the card's clock", "dstorage", "black frame", "enables the", "buffer view", "constant buffer not", "does not translate"
 ) -join "|"
 Select-String -Path $Log -Pattern $patterns |
     ForEach-Object { $_.Line.Trim() } |
