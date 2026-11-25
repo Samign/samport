@@ -7286,7 +7286,16 @@ impl<'a> Lower<'a> {
                     _ => true,
                 };
                 let halves = self.exchange.as_ref().is_some_and(|e| !e.1) && !self.local;
-                let r = if halves && !alike {
+                // `VICTORY_FIRSTLANE_LOCAL=1` (approximate, for testing): where not every lane
+                // runs, each host half-wave takes its own first lane instead of refusing. Right
+                // when the value is the same in both halves; otherwise the two halves of one
+                // console wave may disagree.
+                static FIRSTLANE_LOCAL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+                let firstlane_local = *FIRSTLANE_LOCAL
+                    .get_or_init(|| std::env::var_os("VICTORY_FIRSTLANE_LOCAL").is_some_and(|v| v == "1"));
+                let r = if halves && !alike && firstlane_local && !self.all_lanes(self.cur_ir) {
+                    mine
+                } else if halves && !alike {
                     if !self.all_lanes(self.cur_ir) {
                         need(self.cur_ir);
                         return Err("a first-lane read where not every lane runs");
