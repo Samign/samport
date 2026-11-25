@@ -65,6 +65,9 @@ fn build() -> &'static [u8; 32] {
                     "VICTORY_WAVE_DEEP_SKIPS",
                     "VICTORY_WAVE_OWN_BITS",
                     "VICTORY_F16_NEAREST",
+                    // Not a form switch, but its retry lines print only while
+                    // translating: a run that asks for them gets its own cache.
+                    "VICTORY_WAVE_WHY",
                 ] {
                     bytes.extend_from_slice(name.as_bytes());
                     bytes.push(b'=');

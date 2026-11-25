@@ -302,6 +302,13 @@ pub(crate) fn builder_runs() -> bool {
             of = b.pipelines.len(),
             "the ray-tracing structure builder stays off: not all of its programs have a host pipeline, and its stages run all or none"
         );
+        // Which ones, and why (diagnostics build).
+        #[cfg(feature = "diagnostics")]
+        for p in b.pipelines.iter() {
+            if let Some(why) = make::missing(p) {
+                tracing::warn!(%why, "ray-tracing structure builder program without a host pipeline");
+            }
+        }
         return false;
     }
     tracing::info!(
