@@ -15,7 +15,7 @@ param(
     [Parameter(Mandatory = $true)][string]$Game,
     [string]$Cache = "$env:LOCALAPPDATA\ztrx\cache",   # keep identical between runs or the shader cache starts cold
     [string]$Data  = "$env:LOCALAPPDATA\ztrx\data",
-    [string]$Exe   = "$PSScriptRoot\..\target\diag\victory.exe",
+    [string]$Exe   = "",                              # default: <repo>\target\diag\victory.exe
     [string]$Log   = "$env:TEMP\ztrx-diag.log",
     [string]$Filter = "info",
     [int]$TexturePct = 0,
@@ -47,8 +47,11 @@ if ($Fast)     { $env:VICTORY_RELAY = "2" }
 if ($TexturePct -gt 0)      { $env:VICTORY_TEXTURE_PCT = "$TexturePct" }
 if ($TextureBudgetMB -gt 0) { $env:VICTORY_TEXTURE_BUDGET_MB = "$TextureBudgetMB" }
 
-# The exe: as given (relative to the current folder), or else relative to the repo root.
-$tried = @($Exe, (Join-Path "$PSScriptRoot\.." $Exe))
+# The repo root from this script's own path ($PSScriptRoot can be empty in Windows PowerShell 5.1).
+$root = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
+# The exe: as given (relative to the current folder, then to the repo root), or the diag build.
+if (-not $Exe) { $Exe = Join-Path $root "target\diag\victory.exe" }
+$tried = @($Exe, (Join-Path $root $Exe))
 $found = $tried | Where-Object { Test-Path $_ -PathType Leaf } | Select-Object -First 1
 if (-not $found) {
     Write-Host "victory.exe not found. Looked at:" -ForegroundColor Red
