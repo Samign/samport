@@ -80,6 +80,7 @@ powershell -ExecutionPolicy Bypass -File scripts\debug.ps1 -Game "<your game fol
 | `-InPlaceProbe` / `VICTORY_INPLACE_PROBE=1` | asks the driver what it accepts in place; logs `in place probe` lines |
 | `-GpuTiming` / `VICTORY_GPU_TIMING=1 VICTORY_D3D12_DRED=1` | times every command on the card and ranks them by pipeline (`the card's time by command`); runs slower |
 | `-BarrierTest indirect` / `VICTORY_BARRIER_TEST` | timing only: leaves out GPU waits (`indirect`, `groups`, `both`) to measure what they cost; may glitch |
+| `-SaveShaders <dir>` / `VICTORY_SHADER_SAVE` | saves each shader as given and as translated, by hash; the folder must be outside the repository |
 | `VICTORY_CARD_BUFFERS_MB=0` | keeps the game's large buffers out of card memory (more room for textures, likely slower) |
 
 A failed DirectStorage write into physical pages now says why (an unknown page,
@@ -113,6 +114,9 @@ or a view that could not be mapped or committed).
   waits for every earlier shader write (~12,000 GPU-wide waits a frame); the single
   heaviest dispatches are `f22a76fcb967ee59` (~24 ms), `cfd83392ec9ae408` (~16 ms),
   `cb6adcc6da2613ff` (~10 ms) and `3592426e3e9142d8` (~7 ms).
+- `-BarrierTest indirect` left GPU time unchanged (~289 ms): the waits are not the cost.
+  The ~6,400 indirect commands themselves take ~147 ms (~23 us each), and the card is idle
+  ~210 ms a frame waiting on the CPU, which `-Fast` (overlap) targets.
 - Shaders saved with `VICTORY_SHADER_SAVE=<dir>` for study must stay outside
   the repository (docs/asset-policy.md).
 

@@ -16,6 +16,8 @@
 #   ... -InPlaceProbe                  # ask the driver what in-place memory it accepts (logs "in place probe")
 #   ... -GpuTiming                     # rank GPU time by pipeline ("the card's time by command"); frames get slower
 #   ... -GpuTiming -BarrierTest indirect   # TIMING ONLY: how much the ~12,000 GPU waits around indirect commands cost
+#   ... -Fast                          # VICTORY_RELAY=2: the card works while the CPU prepares the next submission
+#   ... -SaveShaders "$env:TEMP\ztrx-shaders"   # keep the game's shaders for study (never inside the repo)
 #   ... -Builder -WaveWhy -WaveWide    # same, plus the risky two-host-wave form (can hang the GPU)
 param(
     [Parameter(Mandatory = $true)][string]$Game,
@@ -37,7 +39,8 @@ param(
     [int]$InPlaceMB = 0,
     [switch]$InPlaceProbe,
     [switch]$GpuTiming,
-    [string]$BarrierTest = ""
+    [string]$BarrierTest = "",
+    [string]$SaveShaders = ""                         # folder OUTSIDE the repo: each shader as given (.cdxil) and translated (.dxil)
 )
 
 foreach ($v in "VICTORY_KEYS", "VICTORY_CAPTURE", "VICTORY_CAPTURE_FRAMES", "VICTORY_DUMP_TARGETS",
@@ -45,7 +48,7 @@ foreach ($v in "VICTORY_KEYS", "VICTORY_CAPTURE", "VICTORY_CAPTURE_FRAMES", "VIC
                "VICTORY_WIDE_BACK", "VICTORY_TEXTURE_PCT", "VICTORY_TEXTURE_BUDGET_MB",
                "VICTORY_WAVE_WHY", "VICTORY_WAVE_WIDE", "VICTORY_FIRSTLANE_LOCAL", "VICTORY_MEMORY_WRITES",
                "VICTORY_INPLACE", "VICTORY_INPLACE_MB", "VICTORY_INPLACE_PROBE",
-               "VICTORY_GPU_TIMING", "VICTORY_D3D12_DRED", "VICTORY_BARRIER_TEST") {
+               "VICTORY_GPU_TIMING", "VICTORY_D3D12_DRED", "VICTORY_BARRIER_TEST", "VICTORY_SHADER_SAVE") {
     Remove-Item "Env:$v" -ErrorAction SilentlyContinue
 }
 New-Item -ItemType Directory -Force $Cache, $Data | Out-Null
@@ -64,6 +67,17 @@ if ($InPlace -gt 0) {
 if ($GpuTiming) {
     # Each list runs and is timed on its own (slower overall); DRED notes each command's pipeline.
     $env:VICTORY_GPU_TIMING = "1"; $env:VICTORY_D3D12_DRED = "1"
+}
+if ($Fast -and $GpuTiming) {
+    Write-Host "Note: -GpuTiming turns off late wait, so -Fast has no effect in a timing run." -ForegroundColor Yellow
+}
+if ($SaveShaders) {
+    $full = [System.IO.Path]::GetFullPath($SaveShaders)
+    $repo = [System.IO.Path]::GetFullPath((Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)))
+    if ($full.StartsWith($repo, [System.StringComparison]::OrdinalIgnoreCase)) {
+        Write-Host "-SaveShaders must be outside the repository (docs/asset-policy.md)" -ForegroundColor Red; exit 1
+    }
+    $env:VICTORY_SHADER_SAVE = $full
 }
 if ($BarrierTest) {
     # TIMING ONLY: leaves GPU waits out (indirect | groups | both); expect glitches.
