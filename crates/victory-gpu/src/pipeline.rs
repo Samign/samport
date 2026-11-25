@@ -260,10 +260,45 @@ fn of_builder(shaders: &[Arc<Shader>]) -> bool {
 /// shortcut: not a way to run: the title also reads results back (sizes,
 /// counters) and gets none, and a copy's pages are overwritten from title
 /// memory when the title writes them.
+///
+/// `VICTORY_BVH_WRITEBACK=<n>`, to find the stage whose stores land on the
+/// title's objects: the builder's programs are numbered in the order of
+/// their first dispatch (logged once each: `ray-tracing structure builder
+/// stage`), and only those numbered below `n` copy their stores back; the
+/// rest stay quarantined. A run that crashes at `n` and not at `n - 1`
+/// names the stage.
 #[cfg(windows)]
 pub(crate) fn builder_quarantined(this: This) -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
-    is_builder(this) && *ON.get_or_init(|| std::env::var_os("VICTORY_BVH_QUARANTINE").is_some_and(|v| v == "1"))
+    static WRITEBACK: OnceLock<Option<usize>> = OnceLock::new();
+    static ORDER: Mutex<Vec<usize>> = Mutex::new(Vec::new());
+    if !is_builder(this) {
+        return false;
+    }
+    if *ON.get_or_init(|| std::env::var_os("VICTORY_BVH_QUARANTINE").is_some_and(|v| v == "1")) {
+        return true;
+    }
+    let Some(n) = *WRITEBACK.get_or_init(|| std::env::var("VICTORY_BVH_WRITEBACK").ok().and_then(|v| v.trim().parse().ok()))
+    else {
+        return false;
+    };
+    let mut order = ORDER.lock().unwrap_or_else(|e| e.into_inner());
+    let index = match order.iter().position(|&p| p == this as usize) {
+        Some(i) => i,
+        None => {
+            order.push(this as usize);
+            let i = order.len() - 1;
+            let hash = pipeline(this).shaders.first().map_or("?", |s| s.hash.as_str());
+            tracing::warn!(
+                stage = i,
+                hash,
+                writes_back = i < n,
+                "ray-tracing structure builder stage (VICTORY_BVH_WRITEBACK={n})"
+            );
+            i
+        }
+    };
+    index >= n
 }
 
 /// Whether the title's pipeline `this` is one of the structure builder's.
