@@ -93,6 +93,10 @@ or a view that could not be mapped or committed).
   snapshots of every memory copy a raw-address shader might write (~1.9 s), copy-back
   (~1.5 s). Texture uploads are capped per frame, so at 4 s frames the queue grows and
   textures (e.g. clothing) go missing. Use `-Builder` only for testing.
+- With `-NamedWrites` the builder's frame falls from ~4.1 s to ~0.64 s (snapshots ~1.9 s ->
+  ~37 ms, copy-back ~1.5 s -> ~72 ms). The process then holds ~24 GB of private memory;
+  on a PC with little free memory left, Windows pages heavily and the window may show
+  as not responding. Raise the paging file and close other programs.
 - Shaders saved with `VICTORY_SHADER_SAVE=<dir>` for study must stay outside
   the repository (docs/asset-policy.md).
 
