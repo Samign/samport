@@ -86,6 +86,7 @@ powershell -ExecutionPolicy Bypass -File scripts\debug.ps1 -Game "<your game fol
 | `-BarrierTest indirect` / `VICTORY_BARRIER_TEST` | timing only: leaves out GPU waits (`indirect`, `groups`, `both`) to measure what they cost; may glitch |
 | `-SaveShaders <dir>` / `VICTORY_SHADER_SAVE` | saves each shader as given and as translated, by hash; the folder must be outside the repository |
 | `-TextureIdleMS N` / `VICTORY_TEXTURE_IDLE_MS` | how long an unused texture copy is kept on the card (default 5000, at least 250): shorter frees VRAM for textures still waiting |
+| `-DisplayMode 1920x1080` / `VICTORY_DISPLAY_MODE` | the TV size the console reports (layer default 3840x2160). If the game renders for the mode it is given, smaller means less GPU work and smaller render targets |
 | `VICTORY_CARD_BUFFERS_MB=0` | keeps the game's large buffers out of card memory (more room for textures, likely slower) |
 
 A failed DirectStorage write into physical pages now says why (an unknown page,
@@ -143,6 +144,9 @@ or a view that could not be mapped or committed).
   cap was also part of the 4.5 fps result. On 8 GB this is a trade of speed against textures.
 - Rooms stay dark: indoor light comes from the ray-traced lighting, which needs the structure
   builder (still quarantined); only the prebuilt static structures are traversed today.
+- `-TextureIdleMS 1000 -TexturePct 95 -CardBuffersMB 1024`: ~225-240 ms a frame (4.2-4.5 fps),
+  nothing see-through, but card memory slightly over its budget (7,068 of 7,046 MB) and some
+  items black. GPU ~153 ms, card ~82% busy: the frame is GPU-bound.
 - Shaders saved with `VICTORY_SHADER_SAVE=<dir>` for study must stay outside
   the repository (docs/asset-policy.md).
 
