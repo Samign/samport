@@ -161,6 +161,10 @@ or a view that could not be mapped or committed).
   instructions); its translation declares 128 vertices and primitives per group and culls the
   unused ones, which `-MeshCounts` replaces with the game's own counts. PIX could not launch
   the layer ("unspecified error").
+- `-MeshCounts why`: applied to all 313 mesh programs, none skipped, no errors; no measurable
+  gain (~230-240 ms a frame, GPU ~153 ms, in a scene with ~6,000 draws against ~4,600 before).
+  The game's mesh groups are probably mostly full. Left off by default. Card memory was over
+  its budget in this run (7,177 of 6,885 MB), which costs speed too.
 - Shaders saved with `VICTORY_SHADER_SAVE=<dir>` for study must stay outside
   the repository (docs/asset-policy.md).
 
