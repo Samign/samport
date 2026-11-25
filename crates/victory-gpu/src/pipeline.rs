@@ -271,7 +271,6 @@ fn of_builder(shaders: &[Arc<Shader>]) -> bool {
 pub(crate) fn builder_quarantined(this: This) -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
     static WRITEBACK: OnceLock<Option<usize>> = OnceLock::new();
-    static ORDER: Mutex<Vec<usize>> = Mutex::new(Vec::new());
     if !is_builder(this) {
         return false;
     }
@@ -282,23 +281,41 @@ pub(crate) fn builder_quarantined(this: This) -> bool {
     else {
         return false;
     };
-    let mut order = ORDER.lock().unwrap_or_else(|e| e.into_inner());
-    let index = match order.iter().position(|&p| p == this as usize) {
-        Some(i) => i,
-        None => {
-            order.push(this as usize);
-            let i = order.len() - 1;
-            let hash = pipeline(this).shaders.first().map_or("?", |s| s.hash.as_str());
-            tracing::warn!(
-                stage = i,
-                hash,
-                writes_back = i < n,
-                "ray-tracing structure builder stage (VICTORY_BVH_WRITEBACK={n})"
-            );
-            i
+    builder_stage(this) >= n
+}
+
+/// `VICTORY_BVH_RUN=<n>`: only the builder's stages numbered below `n`
+/// ([`builder_stage`]) run; the others are bound and not run (as with
+/// `VICTORY_BVH_DRY=1`, which is `n` = 0). The run that crashes at `n`
+/// and not at `n - 1` names the stage whose stores break the title.
+#[cfg(windows)]
+pub(crate) fn builder_held(this: This) -> bool {
+    static RUN: OnceLock<Option<usize>> = OnceLock::new();
+    let Some(n) = *RUN.get_or_init(|| {
+        if std::env::var_os("VICTORY_BVH_DRY").is_some_and(|v| v == "1") {
+            return Some(0);
         }
+        std::env::var("VICTORY_BVH_RUN").ok().and_then(|v| v.trim().parse().ok())
+    }) else {
+        return false;
     };
-    index >= n
+    is_builder(this) && builder_stage(this) >= n
+}
+
+/// The builder program's number, in the order of first dispatch (each
+/// logged once: `ray-tracing structure builder stage`).
+#[cfg(windows)]
+fn builder_stage(this: This) -> usize {
+    static ORDER: Mutex<Vec<usize>> = Mutex::new(Vec::new());
+    let mut order = ORDER.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(i) = order.iter().position(|&p| p == this as usize) {
+        return i;
+    }
+    order.push(this as usize);
+    let i = order.len() - 1;
+    let hash = pipeline(this).shaders.first().map_or("?", |s| s.hash.as_str());
+    tracing::warn!(stage = i, hash, "ray-tracing structure builder stage");
+    i
 }
 
 /// Whether the title's pipeline `this` is one of the structure builder's.
