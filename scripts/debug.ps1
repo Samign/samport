@@ -47,6 +47,17 @@ if ($Fast)     { $env:VICTORY_RELAY = "2" }
 if ($TexturePct -gt 0)      { $env:VICTORY_TEXTURE_PCT = "$TexturePct" }
 if ($TextureBudgetMB -gt 0) { $env:VICTORY_TEXTURE_BUDGET_MB = "$TextureBudgetMB" }
 
+# The exe: as given (relative to the current folder), or else relative to the repo root.
+$tried = @($Exe, (Join-Path "$PSScriptRoot\.." $Exe))
+$found = $tried | Where-Object { Test-Path $_ -PathType Leaf } | Select-Object -First 1
+if (-not $found) {
+    Write-Host "victory.exe not found. Looked at:" -ForegroundColor Red
+    $tried | ForEach-Object { Write-Host "  $([System.IO.Path]::GetFullPath($_))" }
+    Write-Host "Build it from the repo root first:  cargo build --profile diag -p victory --features diagnostics" -ForegroundColor Yellow
+    Write-Host "or pass the full path with -Exe." -ForegroundColor Yellow
+    exit 1
+}
+$Exe = (Resolve-Path $found).Path
 Write-Host "exe: $Exe`ncache: $Cache`nlog: $Log"
 Write-Host "builder=$([bool]$Builder) quarantine=$([bool]($Builder -and -not $NoQuarantine)) firstlane=$([bool]$FirstLaneLocal) wavewhy=$([bool]$WaveWhy) wavewide=$([bool]$WaveWide) fast=$([bool]$Fast) texpct=$TexturePct texbudget=$TextureBudgetMB"
 
