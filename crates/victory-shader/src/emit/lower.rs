@@ -583,7 +583,25 @@ fn active_uniform(p: &Program, st: &Structured) -> HashSet<Value> {
                 if !fits {
                     continue;
                 }
+                // The vector registers the instruction takes as sources; under a guard it also
+                // reads its destination's old value, which only the lanes that do not run keep.
+                let mut sources: Vec<u8> = Vec::new();
+                let mut add = |op: &Operand| {
+                    if let Operand::Vector { reg, .. } = *op {
+                        sources.extend((0..4).map(|k| reg.saturating_add(k)));
+                    }
+                };
+                match &inst.fields {
+                    Fields::Valu(v) => v.src.iter().for_each(&mut add),
+                    Fields::Ds { addr, data, .. } => {
+                        addr.iter().for_each(&mut add);
+                        data.iter().for_each(&mut add);
+                    }
+                    _ => {}
+                }
+                let written = |reg: u8| inst.writes.iter().any(|w| w.0 == Reg::V(reg));
                 let alike = inst.reads.iter().all(|r| match r.0 {
+                    Reg::V(reg) if !sources.contains(&reg) && written(reg) => true,
                     Reg::V(_) => same.contains(&r.1),
                     Reg::S(code) if code == EXEC || code == EXEC + 1 => true,
                     Reg::S(_) => !is_mask(r.1),

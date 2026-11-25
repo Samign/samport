@@ -433,6 +433,11 @@ impl State {
     /// one indirect execution over records assembled on the card, or the
     /// draws one by one where that cannot be made. Called before anything
     /// else is recorded on the list.
+    /// Whether merged draws wait ([`State::flush_merge`]).
+    pub(crate) fn has_pending(&self) -> bool {
+        self.pending.is_some()
+    }
+
     pub(crate) fn flush_merge(&mut self, list: &HostList) {
         let Some(b) = self.pending.take() else {
             return;
@@ -455,7 +460,13 @@ impl State {
             let frame = crate::frame::current();
             let frames = frame.saturating_sub(FRAME.swap(frame, Ordering::Relaxed)).max(1) as f64;
             let [batches, draws] = [0, 1].map(|i| MERGED[i].swap(0, Ordering::Relaxed) as f64 / frames);
-            tracing::info!("merged indirect mesh draws per frame: {draws:.0} in {batches:.0} executions");
+            let mut ends: Vec<(String, u64)> = ENDS.lock().unwrap_or_else(|e| e.into_inner()).take().into_iter().flatten().collect();
+            ends.sort_by(|a, b| b.1.cmp(&a.1));
+            let ends: Vec<String> = ends.iter().take(8).map(|(why, n)| format!("{why} {:.0}", *n as f64 / frames)).collect();
+            tracing::info!(
+                "merged indirect mesh draws per frame: {draws:.0} in {batches:.0} executions; batches ended per frame by: {}",
+                ends.join(", ")
+            );
         }
     }
 
@@ -2521,6 +2532,26 @@ impl State {
                 && b.targets.1 == self.depth_handle
                 && b.view == view_now;
             if !fits {
+                let why = if !merging {
+                    "a draw that cannot merge"
+                } else if b.records.len() >= WINDOW_MOST as usize {
+                    "64 draws"
+                } else if hit.is_none() {
+                    "a new window"
+                } else if !hit.as_ref().is_some_and(|(scratch, at)| {
+                    scratch.as_raw() == b.scratch.as_raw() && *at == b.base + b.records.len() as u64 * u64::from(b.step)
+                }) {
+                    "not the next record"
+                } else if b.pipeline != self.pipeline {
+                    "another pipeline"
+                } else if b.heaps != self.heaps {
+                    "other heaps"
+                } else if b.targets.0 != self.target_handles || b.targets.1 != self.depth_handle {
+                    "other targets"
+                } else {
+                    "other viewports or scissors"
+                };
+                note_end(why);
                 self.flush_merge(list);
             }
         }
@@ -2749,6 +2780,15 @@ fn merge_on() -> bool {
 
 /// Batches recorded and the draws in them, since the last line.
 static MERGED: [AtomicU64; 2] = [const { AtomicU64::new(0) }; 2];
+
+/// What ended batches since the last line, by reason (`merge_on`).
+static ENDS: std::sync::Mutex<Option<std::collections::HashMap<String, u64>>> = std::sync::Mutex::new(None);
+
+/// Notes what ends the batch waiting (a title call by name, or why a draw did not join).
+pub(crate) fn note_end(why: &str) {
+    let mut ends = ENDS.lock().unwrap_or_else(|e| e.into_inner());
+    *ends.get_or_insert_with(Default::default).entry(why.to_owned()).or_default() += 1;
+}
 
 /// A command signature setting `layout`'s root arguments ([`Capt`] kinds:
 /// 0 constants with their count, 1 root CBV, 2 root SRV, by parameter),

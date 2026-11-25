@@ -158,25 +158,31 @@ fn with_state_keep(this: This, f: impl FnOnce(&crate::host::HostList, &mut crate
 /// Records whatever merged draws of the title list wait, before something
 /// else is recorded on its host list.
 #[cfg(windows)]
-fn flush_merge(this: This) {
+fn flush_merge(this: This, why: &str) {
     if this.is_null() {
         return;
     }
     let Some(list) = host_list(this) else { return };
     // SAFETY: the title passes one of our lists.
     let state = unsafe { &(*this.cast::<List>()).state };
-    state.lock().unwrap_or_else(|e| e.into_inner()).flush_merge(list);
+    let mut state = state.lock().unwrap_or_else(|e| e.into_inner());
+    if state.has_pending() {
+        crate::draw::note_end(why);
+    }
+    state.flush_merge(list);
 }
 
 /// The host list after the merged draws waiting are recorded.
 #[cfg(windows)]
+#[track_caller]
 fn host_list_flushed<'a>(this: This) -> Option<&'a crate::host::HostList> {
-    flush_merge(this);
+    let at = std::panic::Location::caller();
+    flush_merge(this, &format!("list.rs:{}", at.line()));
     host_list(this)
 }
 
 #[cfg(windows)]
-fn state_call(this: This, flush: bool, f: impl FnOnce(&crate::host::HostList, &mut crate::draw::State)) {
+fn state_call<F: FnOnce(&crate::host::HostList, &mut crate::draw::State)>(this: This, flush: bool, f: F) {
     let Some(list) = host_list(this) else { return };
     #[cfg(feature = "diagnostics")]
     let started = std::time::Instant::now();
@@ -185,6 +191,12 @@ fn state_call(this: This, flush: bool, f: impl FnOnce(&crate::host::HostList, &m
     let mut state = state.lock().unwrap_or_else(|e| e.into_inner());
     state.calls += 1;
     if flush {
+        if state.has_pending() {
+            // The list call by the closure it passed (its function's path).
+            let name = std::any::type_name::<F>();
+            let name = name.trim_end_matches("::{{closure}}");
+            crate::draw::note_end(name.rsplit("::").next().unwrap_or(name));
+        }
         state.flush_merge(list);
     }
     f(list, &mut state);
@@ -339,7 +351,7 @@ fn cut(this: This, wait: ValueWait) {
     if this.is_null() {
         return;
     }
-    flush_merge(this);
+    flush_merge(this, "a cut at a wait");
     // SAFETY: the title passes one of our lists; a list is recorded by one
     // thread at a time and is not submitted while it records.
     let list = unsafe { &mut *this.cast_mut().cast::<List>() };
@@ -2049,7 +2061,7 @@ fn value_written(this: This, address: u64, value: u64) {
         {
             return;
         }
-        flush_merge(this);
+        flush_merge(this, "a cut at a write");
         // SAFETY: the title passes one of our lists; a list is recorded by
         // one thread at a time and is not submitted while it records.
         let list = unsafe { &mut *this.cast_mut().cast::<List>() };
