@@ -1,6 +1,6 @@
-# ztrx
+# samport
 
-**ztrx** runs the Xbox Series build of the game natively on Windows PCs with
+**samport** runs the Xbox Series build of the game natively on Windows PCs with
 NVIDIA graphics cards, from game files you supply yourself.
 
 **This repository contains no game files or assets.** You need your own copy
@@ -8,7 +8,7 @@ of the game. Not affiliated with or endorsed by its developer or publisher.
 
 ## Status (2026-11-25)
 
-Tested on Windows 11 with an **NVIDIA GeForce RTX 3050** (8 GB):
+Tested on Windows 11 with an **NVIDIA GeForce RTX 3070 ti** (8 GB):
 
 | | |
 |---|---|
@@ -60,4 +60,4 @@ Diagnostics build: `cargo build --profile diag -p victory --features diagnostics
 
 ## License
 
-GPL-3.0-or-later (see `LICENSE`). Based on VIctory (Marvisak) and victory-fork (fxceless).
+GPL-3.0-or-later (see `LICENSE`). Based on VIctory (Marvisak), victory-fork (fxceless) and ztrx
