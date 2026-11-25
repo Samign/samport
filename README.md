@@ -169,6 +169,12 @@ or a view that could not be mapped or committed).
   textures ~5.2 GB): below 1080p the game does not render smaller. 1080p stays the default.
 - Of ~2,600-4,500 indirect mesh draws a frame, none could join the one before as recorded:
   there is always a title call between, and the state differs. What differs is logged next.
+- What differs, of ~3,300 a frame that read the next record: root slot 1 (a descriptor table)
+  every time, slot 2 (a table) ~2,700 times, slots 3-4 (constants or a view) ~1,600 times each,
+  the pipeline ~700 times. Indirect execution can change root constants and views per record,
+  but not descriptor tables, so merging these draws would first need the translator to pass
+  tables as heap indices (bindless) and the layer to stop making a table per draw: a rewrite of
+  the binding model, not a patch. The counters are in diagnostics builds only.
 - Shaders saved with `VICTORY_SHADER_SAVE=<dir>` for study must stay outside
   the repository (docs/asset-policy.md).
 

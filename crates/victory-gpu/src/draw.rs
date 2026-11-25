@@ -182,6 +182,7 @@ pub(crate) struct State {
     /// the last indirect mesh draw: the call count at it, its state's hash,
     /// its argument copy and offset (for [`note_mergeable`]).
     pub(crate) calls: u64,
+    #[cfg(feature = "diagnostics")]
     last_mesh: Option<MeshSnap>,
     /// What the host list has: pipeline, root signature, heaps.
     host_pipeline: usize,
@@ -2448,6 +2449,7 @@ impl State {
         list.note_op(|| {
             self.op_text(format!("indirect kind {kind} max {max} at {arguments:#x}"), kind == DISPATCH)
         });
+        #[cfg(feature = "diagnostics")]
         if kind == MESH {
             let view = {
                 use std::hash::{Hash, Hasher};
@@ -2484,6 +2486,8 @@ impl State {
             };
             note_mergeable(strict, loose);
             self.last_mesh = Some(now);
+        }
+        if kind == MESH {
             self.mesh_scissor(list, true);
         }
         // SAFETY: an open list with everything set; the scratch buffer and
@@ -2517,8 +2521,10 @@ impl State {
 /// scissors whatever came between (`loose`); both reading the next record of
 /// the same argument buffer. What a merging of such draws into one indirect
 /// call would save.
+#[cfg(feature = "diagnostics")]
 static MERGE: [AtomicU64; 3] = [const { AtomicU64::new(0) }; 3];
 
+#[cfg(feature = "diagnostics")]
 /// What an indirect mesh draw was given, to compare with the next one.
 #[derive(Default, Clone)]
 pub(crate) struct MeshSnap {
@@ -2536,9 +2542,12 @@ pub(crate) struct MeshSnap {
 /// changed the pipeline, the heaps, the targets, the viewports or scissors;
 /// and per root slot (up to 16), how many changed it as a table, as
 /// constants, as a view.
+#[cfg(feature = "diagnostics")]
 static DIFFS: [AtomicU64; 6] = [const { AtomicU64::new(0) }; 6];
+#[cfg(feature = "diagnostics")]
 static SLOT_DIFFS: [[AtomicU64; 3]; 16] = [const { [const { AtomicU64::new(0) }; 3] }; 16];
 
+#[cfg(feature = "diagnostics")]
 fn note_diffs(last: &MeshSnap, now: &MeshSnap) {
     DIFFS[0].fetch_add(1, Ordering::Relaxed);
     for (k, changed) in [
@@ -2573,6 +2582,7 @@ fn note_diffs(last: &MeshSnap, now: &MeshSnap) {
     }
 }
 
+#[cfg(feature = "diagnostics")]
 fn say_diffs(frames: f64) {
     let d: Vec<f64> = DIFFS.iter().map(|c| c.swap(0, Ordering::Relaxed) as f64 / frames).collect();
     let mut slots = String::new();
@@ -2595,6 +2605,7 @@ fn say_diffs(frames: f64) {
     );
 }
 
+#[cfg(feature = "diagnostics")]
 fn note_mergeable(strict: bool, loose: bool) {
     MERGE[0].fetch_add(1, Ordering::Relaxed);
     if strict {
