@@ -8,7 +8,7 @@ param(
     [int]$Relay = 2,    # overlap: the card works while the CPU prepares (VICTORY_RELAY); 0 turns it off
     [int]$WideBack = 1, # shader-write snapshots and compares on several threads (VICTORY_WIDE_BACK); 0 turns it off
     [int]$CardBuffersMinMB = 1,    # buffers of this size or more are compared on the card (layer default 16)
-    [int]$CardBuffersMB = 1024,    # most card memory for those copies (layer default 512; 1024 is faster, costs VRAM)
+    [int]$CardBuffersMB = 768,     # most card memory for those copies (layer default 512; 1024 went over the VRAM budget)
     [int]$IndirectWindow = 1,      # clamp up to 64 indirect mesh records in one pass (VICTORY_INDIRECT_WINDOW); 0 off
     [int]$TextureIdleMS = 1000,    # unused texture copies leave the card after this long (VICTORY_TEXTURE_IDLE_MS)
     [string]$DisplayMode = "1920x1080", # the TV size the console reports (VICTORY_DISPLAY_MODE; layer default 3840x2160)

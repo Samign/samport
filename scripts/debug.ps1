@@ -41,7 +41,7 @@ param(
     [switch]$NoFast,
     [switch]$NoWideBack,                              # snapshots/compares of shader writes on several threads is on by default
     [int]$CardBuffersMinMB = 1,                       # VICTORY_CARD_BUFFERS_MIN_MB: smallest buffer whose copy lives in card memory (layer default 16)
-    [int]$CardBuffersMB = 1024,                       # VICTORY_CARD_BUFFERS_MB: most bytes of such copies (layer default 512; 1024 is faster, costs VRAM)
+    [int]$CardBuffersMB = 768,                        # VICTORY_CARD_BUFFERS_MB: most bytes of such copies (layer default 512; 1024 was faster but went over the VRAM budget)
     [switch]$IndirectWindow,                          # kept for old command lines: the window is on by default
     [switch]$NoIndirectWindow,
     [string]$MeshCounts = "",                         # VICTORY_MESH_COUNTS: 1 = mesh shaders set their own output counts; why = also say per shader
