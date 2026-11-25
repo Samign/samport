@@ -17,7 +17,7 @@
 #   ... -GpuTiming                     # rank GPU time by pipeline ("the card's time by command"); frames get slower
 #   ... -GpuTiming -BarrierTest indirect   # TIMING ONLY: how much the ~12,000 GPU waits around indirect commands cost
 #   ... -CardBuffersMinMB 16           # the layer's own default (the script uses 1: the card compares buffers of 1 MiB+, up to 512 MB)
-#   ... -DisplayMode 1920x1080         # report a 1080p TV: the game may render smaller (less GPU work and VRAM)
+#   ... -DisplayMode 2560x1440         # the default reports a 1080p TV (less GPU work and VRAM); 3840x2160 is the layer's own
 #   ... -TextureIdleMS 1000 -TexturePct 95   # free unused texture copies sooner and let textures use more of the card
 #   ... -NoIndirectWindow              # one clamp pass per indirect draw again (the window, on by default, clamps up to 64 at once)
 #   ... -NoFast                        # turn off overlap (on by default: VICTORY_RELAY=2, the card works while the CPU prepares)
@@ -39,11 +39,11 @@ param(
     [switch]$NoFast,
     [switch]$NoWideBack,                              # snapshots/compares of shader writes on several threads is on by default
     [int]$CardBuffersMinMB = 1,                       # VICTORY_CARD_BUFFERS_MIN_MB: smallest buffer whose copy lives in card memory (layer default 16)
-    [int]$CardBuffersMB = 512,                        # VICTORY_CARD_BUFFERS_MB: most bytes of such copies (1024 left textures no room on 8 GB)
+    [int]$CardBuffersMB = 1024,                       # VICTORY_CARD_BUFFERS_MB: most bytes of such copies (layer default 512; 1024 is faster, costs VRAM)
     [switch]$IndirectWindow,                          # kept for old command lines: the window is on by default
     [switch]$NoIndirectWindow,
-    [int]$TextureIdleMS = 0,
-    [string]$DisplayMode = "",                        # VICTORY_DISPLAY_MODE: the TV size the console reports, e.g. 1920x1080 (layer default 3840x2160)                          # VICTORY_TEXTURE_IDLE_MS: free unused texture copies after this long (layer default 5000)                        # VICTORY_INDIRECT_WINDOW off
+    [int]$TextureIdleMS = 1000,                       # unused texture copies leave the card after 1 s (layer default 5000)
+    [string]$DisplayMode = "1920x1080",               # VICTORY_DISPLAY_MODE: the TV size the console reports (layer default 3840x2160)                          # VICTORY_TEXTURE_IDLE_MS: free unused texture copies after this long (layer default 5000)                        # VICTORY_INDIRECT_WINDOW off
     [switch]$FirstLaneLocal,
     [switch]$NoQuarantine,
     [switch]$NamedWrites,

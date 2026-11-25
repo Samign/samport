@@ -8,8 +8,10 @@ param(
     [int]$Relay = 2,    # overlap: the card works while the CPU prepares (VICTORY_RELAY); 0 turns it off
     [int]$WideBack = 1, # shader-write snapshots and compares on several threads (VICTORY_WIDE_BACK); 0 turns it off
     [int]$CardBuffersMinMB = 1,    # buffers of this size or more are compared on the card (layer default 16)
-    [int]$CardBuffersMB = 512,     # most card memory for those copies (1024 left textures no room on 8 GB)
-    [int]$IndirectWindow = 1       # clamp up to 64 indirect mesh records in one pass (VICTORY_INDIRECT_WINDOW); 0 off
+    [int]$CardBuffersMB = 1024,    # most card memory for those copies (layer default 512; 1024 is faster, costs VRAM)
+    [int]$IndirectWindow = 1,      # clamp up to 64 indirect mesh records in one pass (VICTORY_INDIRECT_WINDOW); 0 off
+    [int]$TextureIdleMS = 1000,    # unused texture copies leave the card after this long (VICTORY_TEXTURE_IDLE_MS)
+    [string]$DisplayMode = "1920x1080"  # the TV size the console reports (VICTORY_DISPLAY_MODE; layer default 3840x2160)
 )
 foreach ($v in "VICTORY_KEYS", "VICTORY_CAPTURE", "VICTORY_CAPTURE_FRAMES", "VICTORY_DUMP_TARGETS") {
     Remove-Item "Env:$v" -ErrorAction SilentlyContinue
@@ -28,6 +30,8 @@ if ($WideBack -gt 0) { $env:VICTORY_WIDE_BACK = "1" } else { Remove-Item Env:VIC
 $env:VICTORY_CARD_BUFFERS_MIN_MB = "$CardBuffersMinMB"
 $env:VICTORY_CARD_BUFFERS_MB = "$CardBuffersMB"
 if ($IndirectWindow -gt 0) { $env:VICTORY_INDIRECT_WINDOW = "1" } else { Remove-Item Env:VICTORY_INDIRECT_WINDOW -ErrorAction SilentlyContinue }
+$env:VICTORY_TEXTURE_IDLE_MS = "$TextureIdleMS"
+if ($DisplayMode) { $env:VICTORY_DISPLAY_MODE = $DisplayMode } else { Remove-Item Env:VICTORY_DISPLAY_MODE -ErrorAction SilentlyContinue }
 $env:VICTORY_CACHE_DIR = $Cache
 $env:VICTORY_DATA_DIR = $Data
 & $Exe run $Game --execute 2>&1 | Out-File "$env:TEMP\ztrx.log" -Encoding utf8

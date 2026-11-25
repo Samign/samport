@@ -77,7 +77,7 @@ powershell -ExecutionPolicy Bypass -File scripts\debug.ps1 -Game "<your game fol
 | `-WaveWhy` / `VICTORY_WAVE_WHY=1` | prints why each 64-lane retry fails (`WAVE64-RETRY`); part of the shader cache key |
 | overlap / `VICTORY_RELAY=2` | **default in `play.ps1` (`-Relay 0` off) and `debug.ps1` (`-NoFast` off)**: the card runs a submission while the CPU prepares the next |
 | `VICTORY_WIDE_BACK=1` | **default in both scripts** (`-WideBack 0` / `-NoWideBack` off): snapshots and compares of shader-written ranges run on several threads |
-| `-CardBuffersMinMB 1` | **default in both scripts**: the card, not the CPU, looks for shader writes in buffers of 1 MiB or more, within `VICTORY_CARD_BUFFERS_MB` (512). At 1024 the copies took ~940 MB of VRAM and textures had no room left on an 8 GB card |
+| `-CardBuffersMinMB 1 -CardBuffersMB 1024` | **default in both scripts**: the card, not the CPU, looks for shader writes in buffers of 1 MiB or more (layer defaults 16 / 512). Faster (~220 vs ~400 ms a frame), at ~940 MB of VRAM |
 | `VICTORY_INDIRECT_WINDOW=1` | **default in both scripts** (`-IndirectWindow 0` / `-NoIndirectWindow` off); off by default in the layer: the game draws its mesh records one per call from consecutive slots; this clamps up to 64 of them in one pass, instead of a compute pass between two waits before every draw |
 | `-InPlace 1` / `VICTORY_INPLACE=1` | **default in `play.ps1` and `debug.ps1`** (`-InPlace 0` turns it off). Zero-copy (in the code upstream, off by default there): game memory outside buffers is opened as a host heap the card reads directly, instead of being copied (~6.4 GB of copies in a builder run). Locks up to `VICTORY_INPLACE_MB` (4096) of it into RAM. A `title memory in place` line every 10 s says what was placed and what was turned down |
 | `-InPlace 2` | also the game's buffers (not the big ones in card memory). Turns overlap off (not compatible with late wait) |
@@ -85,8 +85,8 @@ powershell -ExecutionPolicy Bypass -File scripts\debug.ps1 -Game "<your game fol
 | `-GpuTiming` / `VICTORY_GPU_TIMING=1 VICTORY_D3D12_DRED=1` | times every command on the card and ranks them by pipeline (`the card's time by command`); runs slower |
 | `-BarrierTest indirect` / `VICTORY_BARRIER_TEST` | timing only: leaves out GPU waits (`indirect`, `groups`, `both`) to measure what they cost; may glitch |
 | `-SaveShaders <dir>` / `VICTORY_SHADER_SAVE` | saves each shader as given and as translated, by hash; the folder must be outside the repository |
-| `-TextureIdleMS N` / `VICTORY_TEXTURE_IDLE_MS` | how long an unused texture copy is kept on the card (default 5000, at least 250): shorter frees VRAM for textures still waiting |
-| `-DisplayMode 1920x1080` / `VICTORY_DISPLAY_MODE` | the TV size the console reports (layer default 3840x2160). If the game renders for the mode it is given, smaller means less GPU work and smaller render targets |
+| `-TextureIdleMS N` / `VICTORY_TEXTURE_IDLE_MS` | **1000 in both scripts**: how long an unused texture copy is kept on the card (default 5000, at least 250): shorter frees VRAM for textures still waiting |
+| `-DisplayMode 1920x1080` / `VICTORY_DISPLAY_MODE` | **default in both scripts** (`-DisplayMode 3840x2160` for the layer's own): the TV size the console reports (layer default 3840x2160). If the game renders for the mode it is given, smaller means less GPU work and smaller render targets |
 | `VICTORY_CARD_BUFFERS_MB=0` | keeps the game's large buffers out of card memory (more room for textures, likely slower) |
 
 A failed DirectStorage write into physical pages now says why (an unknown page,
@@ -147,6 +147,9 @@ or a view that could not be mapped or committed).
 - `-TextureIdleMS 1000 -TexturePct 95 -CardBuffersMB 1024`: ~225-240 ms a frame (4.2-4.5 fps),
   nothing see-through, but card memory slightly over its budget (7,068 of 7,046 MB) and some
   items black. GPU ~153 ms, card ~82% busy: the frame is GPU-bound.
+- `-DisplayMode 1920x1080` (now default with the above): **~196-208 ms a frame (4.8-5.1 fps)**,
+  GPU ~131 ms, looks better. Host textures only fell ~5.3 -> ~5.2 GB, so the game's render
+  targets barely shrank: it may follow the mode only in part.
 - Shaders saved with `VICTORY_SHADER_SAVE=<dir>` for study must stay outside
   the repository (docs/asset-policy.md).
 
