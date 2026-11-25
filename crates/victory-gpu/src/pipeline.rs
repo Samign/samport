@@ -126,6 +126,9 @@ pub(crate) struct Translated {
     /// Whether the shader's code can store to buffer memory ([`stores`]);
     /// true when its code is not known.
     pub(crate) stores: bool,
+    /// How the translation is only approximate, if it is
+    /// ([`victory_shader::emit::take_approximate`]).
+    pub(crate) approximate: Option<String>,
 }
 
 #[cfg(windows)]
@@ -182,7 +185,7 @@ fn translate(container: &[u8]) -> Result<Translated, String> {
         Some(part) => victory_shader::native_programs(part.data).map_err(|e| e.to_string())?,
         None => Vec::new(),
     };
-    let host = crate::shader_cache::host_shader(container)?;
+    let (host, approximate) = crate::shader_cache::host_shader(container)?;
     let stores = programs.is_empty() || programs.iter().any(stores);
     let used = programs
         .into_iter()
@@ -194,7 +197,7 @@ fn translate(container: &[u8]) -> Result<Translated, String> {
         })
         .map(|p| p.used)
         .unwrap_or_default();
-    Ok(Translated { host, used, stores })
+    Ok(Translated { host, used, stores, approximate })
 }
 
 /// The compute pipelines of the console's ray-tracing structure builder
@@ -310,6 +313,39 @@ pub(crate) fn builder_runs() -> bool {
             }
         }
         return false;
+    }
+    // A stage translated only approximately places its stores by half-wave
+    // sums where the console sums the whole wave: its output lands beside
+    // where the next stage looks, and on the title's own objects (the
+    // crashes of runs with VICTORY_BVH_QUARANTINE off: the title read
+    // pointers of 0xffffffffffffffff). Such a builder stays off unless
+    // `VICTORY_BVH_APPROX=1` (or quarantined, where its stores stay ours).
+    let approximate: Vec<String> = b
+        .pipelines
+        .iter()
+        .flat_map(|p| p.shaders.iter())
+        .filter_map(|s| {
+            let t = s.translated.get()?.as_ref()?;
+            let why = t.approximate.as_deref()?;
+            Some(format!("{} {} ({why})", s.stage, s.hash))
+        })
+        .collect();
+    if !approximate.is_empty() {
+        for which in &approximate {
+            tracing::warn!(%which, "ray-tracing structure builder program translated only approximately");
+        }
+        static APPROX_OK: OnceLock<bool> = OnceLock::new();
+        let ok = *APPROX_OK.get_or_init(|| std::env::var_os("VICTORY_BVH_APPROX").is_some_and(|v| v == "1"));
+        let quarantined = std::env::var_os("VICTORY_BVH_QUARANTINE").is_some_and(|v| v == "1");
+        if !ok && !quarantined {
+            b.off = true;
+            tracing::warn!(
+                approximate = approximate.len(),
+                of = b.pipelines.len(),
+                "the ray-tracing structure builder stays off: some of its programs are translated only approximately and would store over the title's memory (VICTORY_BVH_APPROX=1 runs it anyway)"
+            );
+            return false;
+        }
     }
     tracing::info!(
         pipelines = b.pipelines.len(),

@@ -10,6 +10,8 @@
 #   ... -Builder -WaveWhy              # try the RT builder and print why each wave64 retry fails
 #   ... -Builder -FirstLaneLocal       # approximate first-lane reads so the 3 missing builder programs translate
 #   ... -Builder -FirstLaneLocal -NoQuarantine   # DO NOT USE yet: crashed the game (builder output landed on game pointers)
+#   ... -Builder -NoQuarantine -WaveWhy          # safe now: the builder stays off if any of its programs is only approximate
+#   ... -Builder -NoQuarantine -BvhApprox        # runs an approximate builder anyway (expect the old crash)
 #   ... -Builder -FirstLaneLocal -NamedWrites    # experimental: snapshot only memory a dispatch names (much less CPU work)
 #   ... -InPlace 0                     # turn off zero-copy (on by default: memory outside buffers is shared with the card, not copied)
 #   ... -InPlace 2                     # also the game's buffers (turns -Fast off)
@@ -52,6 +54,7 @@ param(
     [string]$DisplayMode = "1920x1080",               # VICTORY_DISPLAY_MODE: the TV size the console reports (layer default 3840x2160)                          # VICTORY_TEXTURE_IDLE_MS: free unused texture copies after this long (layer default 5000)                        # VICTORY_INDIRECT_WINDOW off
     [switch]$FirstLaneLocal,
     [switch]$NoQuarantine,
+    [switch]$BvhApprox,
     [switch]$NamedWrites,
     [int]$InPlace = 1,                                # 1 (default): zero-copy for memory outside buffers; 0 off
     [int]$InPlaceMB = 0,
@@ -66,7 +69,7 @@ $explicitFast = $PSBoundParameters.ContainsKey('Fast')
 if ($InPlace -ge 2 -and $explicitFast) { Write-Host "-InPlace 2 cannot be combined with -Fast / VICTORY_LATE_WAIT" -ForegroundColor Red; exit 1 }
 $Fast = -not $NoFast -and $InPlace -lt 2 -and -not $GpuTiming
 foreach ($v in "VICTORY_KEYS", "VICTORY_CAPTURE", "VICTORY_CAPTURE_FRAMES", "VICTORY_DUMP_TARGETS",
-               "VICTORY_BVH_BUILDER", "VICTORY_BVH_QUARANTINE", "VICTORY_RELAY", "VICTORY_LATE_WAIT",
+               "VICTORY_BVH_BUILDER", "VICTORY_BVH_QUARANTINE", "VICTORY_BVH_APPROX", "VICTORY_RELAY", "VICTORY_LATE_WAIT",
                "VICTORY_WIDE_BACK", "VICTORY_TEXTURE_PCT", "VICTORY_TEXTURE_BUDGET_MB",
                "VICTORY_WAVE_WHY", "VICTORY_WAVE_WIDE", "VICTORY_FIRSTLANE_LOCAL", "VICTORY_MEMORY_WRITES",
                "VICTORY_INPLACE", "VICTORY_INPLACE_MB", "VICTORY_INPLACE_PROBE",
@@ -80,6 +83,7 @@ $env:VICTORY_DATA_DIR  = $Data
 $env:VICTORY_LOG       = $Filter
 
 if ($Builder)  { $env:VICTORY_BVH_BUILDER = "1"; if (-not $NoQuarantine) { $env:VICTORY_BVH_QUARANTINE = "1" } }
+if ($BvhApprox) { $env:VICTORY_BVH_APPROX = "1" }
 if ($WaveWhy)  { $env:VICTORY_WAVE_WHY = "1" }
 if ($WaveWide) { $env:VICTORY_WAVE_WIDE = "1" }
 if ($InPlace -gt 0) {
@@ -149,6 +153,7 @@ $patterns = @(
     "builder", "host pipeline refused", "host mesh pipeline", "WAVE64-RETRY",
     "converter shader", "dropped .* without a host pipeline: ", "library saved",
     "ms/frame", "textures picked by index", "device removed", "ERROR",
+    "first-chance exception", "only approximately",
     "program without a host pipeline", "MESH-COUNTS", "indirect mesh draws per frame", "merged indirect mesh draws", "record assembler", "merged mesh command signature", "indirect mesh draws reading the next record", "in place", "copystat: memory: ", "display mode reported", "depth texture with", "swap chain",  "time by command", "the card's clock", "dstorage", "black frame", "enables the", "buffer view", "constant buffer not", "does not translate"
 ) -join "|"
 Select-String -Path $Log -Pattern $patterns |

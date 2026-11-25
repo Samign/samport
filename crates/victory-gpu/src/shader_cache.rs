@@ -5,9 +5,11 @@
 //! `victory-pipeline`'s content-addressed cache, which writes them
 //! atomically; an entry that does not read back is translated again.
 //!
-//! The entry is our own encoding of [`HostShader`]: a field added to it
-//! must be added to `encode` and `decode` too (entries of older builds
-//! are ignored anyway).
+//! The entry is our own encoding of [`HostShader`], and how the
+//! translation is approximate if it is
+//! ([`victory_shader::emit::take_approximate`]): a field added to it must
+//! be added to `encode` and `decode` too (entries of older builds are
+//! ignored anyway).
 
 use std::path::PathBuf;
 use std::sync::OnceLock;
@@ -94,10 +96,17 @@ fn build() -> &'static [u8; 32] {
     })
 }
 
+/// A translation, and how it is approximate if it is.
+pub(crate) type Entry = (HostShader, Option<String>);
+
 /// The translation of a console shader container, from the cache when
 /// there is one.
-pub(crate) fn host_shader(container: &[u8]) -> Result<HostShader, String> {
-    let translate = |c: &[u8]| victory_shader::emit::translate(c).map_err(|e| e.to_string());
+pub(crate) fn host_shader(container: &[u8]) -> Result<Entry, String> {
+    let translate = |c: &[u8]| {
+        let shader = victory_shader::emit::translate(c).map_err(|e| e.to_string());
+        let approximate = victory_shader::emit::take_approximate().map(str::to_owned);
+        shader.map(|s| (s, approximate))
+    };
     match CACHE.get() {
         Some(cache) => cached(cache, build(), container, translate),
         None => translate(container),
@@ -111,7 +120,7 @@ struct Translate<F> {
     ran: AtomicBool,
 }
 
-impl<F: Fn(&[u8]) -> Result<HostShader, String> + Send + Sync> Converter for Translate<F> {
+impl<F: Fn(&[u8]) -> Result<Entry, String> + Send + Sync> Converter for Translate<F> {
     fn id(&self) -> &'static str {
         "shader.dxil"
     }
@@ -130,8 +139,8 @@ fn cached(
     cache: &Cache,
     build: &[u8; 32],
     container: &[u8],
-    translate: impl Fn(&[u8]) -> Result<HostShader, String> + Send + Sync,
-) -> Result<HostShader, String> {
+    translate: impl Fn(&[u8]) -> Result<Entry, String> + Send + Sync,
+) -> Result<Entry, String> {
     let input = [&build[..], container].concat();
     let converter = Translate {
         translate,
@@ -158,7 +167,7 @@ fn cached(
     (converter.translate)(container)
 }
 
-const MAGIC: &[u8; 4] = b"VSH1";
+const MAGIC: &[u8; 4] = b"VSH2";
 const STAGES: [HwStage; 8] = [
     HwStage::Ls,
     HwStage::Hs,
@@ -195,7 +204,7 @@ fn root_type(code: u32) -> RootType {
 }
 
 /// Little-endian words and length-prefixed lists.
-fn encode(s: &HostShader) -> Vec<u8> {
+fn encode((s, approximate): &Entry) -> Vec<u8> {
     let mut out = MAGIC.to_vec();
     let word = |out: &mut Vec<u8>, v: u32| out.extend(v.to_le_bytes());
     let stage = STAGES.iter().position(|&x| x == s.stage).unwrap_or(0) as u32;
@@ -249,10 +258,13 @@ fn encode(s: &HostShader) -> Vec<u8> {
             word(&mut out, value);
         }
     }
+    let approximate = approximate.as_deref().unwrap_or("").as_bytes();
+    word(&mut out, approximate.len() as u32);
+    out.extend(approximate);
     out
 }
 
-fn decode(bytes: &[u8]) -> Option<HostShader> {
+fn decode(bytes: &[u8]) -> Option<Entry> {
     struct Reader<'a>(&'a [u8]);
     impl<'a> Reader<'a> {
         fn take(&mut self, n: usize) -> Option<&'a [u8]> {
@@ -317,7 +329,9 @@ fn decode(bytes: &[u8]) -> Option<HostShader> {
             shift: u8::try_from(r.word()?).ok().filter(|&s| s < 32)?,
         });
     }
-    r.0.is_empty().then_some(HostShader {
+    let approximate = String::from_utf8(r.list()?).ok()?;
+    let approximate = (!approximate.is_empty()).then_some(approximate);
+    let shader = HostShader {
         stage,
         dxil,
         user_data,
@@ -327,15 +341,16 @@ fn decode(bytes: &[u8]) -> Option<HostShader> {
         root_srvs,
         root_uavs,
         root_indexed_views,
-    })
+    };
+    r.0.is_empty().then_some((shader, approximate))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn shader() -> HostShader {
-        HostShader {
+    fn shader() -> Entry {
+        let shader = HostShader {
             stage: HwStage::Ps,
             dxil: b"DXBC and the rest".to_vec(),
             user_data: vec![UserData {
@@ -361,7 +376,8 @@ mod tests {
                 byte_offset: 32,
                 shift: 5,
             }],
-        }
+        };
+        (shader, Some("each host half-wave as a wave of its own".to_owned()))
     }
 
     #[test]
@@ -385,7 +401,7 @@ mod tests {
 
         // A damaged entry is a miss, translated and stored again.
         for e in walk(dir.path()) {
-            std::fs::write(e, b"VSH1 broken").unwrap();
+            std::fs::write(e, b"VSH2 broken").unwrap();
         }
         assert_eq!(cached(&cache, &build, container, translate), Ok(shader()));
         assert_eq!(runs.load(Ordering::Relaxed), 3);
@@ -393,7 +409,7 @@ mod tests {
         assert_eq!(runs.load(Ordering::Relaxed), 3);
 
         // Failures are not stored.
-        let fail = |_: &[u8]| Err::<HostShader, _>("unsupported".to_owned());
+        let fail = |_: &[u8]| Err::<Entry, _>("unsupported".to_owned());
         assert!(cached(&cache, &build, b"other", fail).is_err());
     }
 
@@ -416,5 +432,7 @@ mod tests {
         assert_eq!(decode(&bytes[..bytes.len() - 1]), None);
         assert_eq!(decode(&[bytes.as_slice(), &[0]].concat()), None);
         assert_eq!(decode(b"VSH0"), None);
+        let plain = (shader().0, None);
+        assert_eq!(decode(&encode(&plain)), Some(plain));
     }
 }

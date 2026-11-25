@@ -297,6 +297,30 @@ pub fn translate(container: &[u8]) -> Result<HostShader, ShaderError> {
     emit(&c, &native, &p, &st, &io, &res)
 }
 
+thread_local! {
+    /// How the last translation on this thread is approximate, if it is
+    /// ([`take_approximate`]).
+    static APPROXIMATE: std::cell::Cell<Option<&'static str>> = const { std::cell::Cell::new(None) };
+}
+
+/// How the translation this thread made last is only approximate, if it is:
+/// a console wave run as two host waves that each compute their own result
+/// where the console computes one for the whole wave. Such a program is
+/// fine for drawing (a tile-wide count becomes two half-tile ones) and
+/// wrong for a program whose stores are placed by those results (the
+/// ray-tracing structure builder: its offsets come from wave-wide sums).
+pub fn take_approximate() -> Option<&'static str> {
+    APPROXIMATE.with(|a| a.take())
+}
+
+pub(crate) fn note_approximate(why: &'static str) {
+    APPROXIMATE.with(|a| {
+        if a.get().is_none() {
+            a.set(Some(why));
+        }
+    });
+}
+
 /// Emits a program whose earlier stages already ran.
 pub fn emit(
     c: &Container,
@@ -306,6 +330,7 @@ pub fn emit(
     io: &io::Io,
     res: &resource::Resources,
 ) -> Result<HostShader, ShaderError> {
+    APPROXIMATE.with(|a| a.set(None));
     // (what an earlier program's lowering on this thread left behind)
     lower::take_needs();
     let original = emit_program(c, native, p, st, io, res);
@@ -430,6 +455,9 @@ pub fn emit(
                     let local = lower::with_local_waves(|| emit_program(c, native, p, st, io, res));
                     report(&format!("local waves ({}), {name}", if exact { "idiom" } else { "APPROXIMATE" }), &local);
                     if done(&local) {
+                        if !exact {
+                            note_approximate("each host half-wave as a wave of its own");
+                        }
                         return local.map(|(shader, _)| shader);
                     }
                 }
@@ -438,6 +466,9 @@ pub fn emit(
                 let local = lower::with_local_waves(|| emit_program(c, native, p, st, io, res));
                 report(if exact { "local waves (idiom)" } else { "local waves (APPROXIMATE)" }, &local);
                 if done(&local) {
+                    if !exact {
+                        note_approximate("each host half-wave as a wave of its own");
+                    }
                     return local.map(|(shader, _)| shader);
                 }
             }
@@ -450,6 +481,7 @@ pub fn emit(
                         let local = lower::with_local_waves_any(|| emit_program(c, native, p, st, io, res));
                         report(&format!("local waves (APPROXIMATE, any mask), {name}"), &local);
                         if done(&local) {
+                            note_approximate("every lane mask and lane read per host half-wave");
                             return local.map(|(shader, _)| shader);
                         }
                     }
@@ -457,6 +489,7 @@ pub fn emit(
                 let local = lower::with_local_waves_any(|| emit_program(c, native, p, st, io, res));
                 report("local waves (APPROXIMATE, any mask)", &local);
                 if done(&local) {
+                    note_approximate("every lane mask and lane read per host half-wave");
                     return local.map(|(shader, _)| shader);
                 }
             }

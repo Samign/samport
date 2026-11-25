@@ -7618,6 +7618,9 @@ impl<'a> Lower<'a> {
                     _ => false,
                 };
                 let r = if halves && !alike && (active_alike || firstlane_local) && !self.all_lanes(self.cur_ir) {
+                    if !active_alike {
+                        super::note_approximate("a first-lane read per host half-wave (VICTORY_FIRSTLANE_LOCAL)");
+                    }
                     mine
                 } else if halves && !alike {
                     if !self.all_lanes(self.cur_ir) {
