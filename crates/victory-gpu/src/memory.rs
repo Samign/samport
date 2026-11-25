@@ -226,12 +226,51 @@ impl Memory {
     }
 
     /// What a dispatch names: the copy around `address` and the 4 MiB
-    /// after it.
-    fn name(&mut self, address: u64) {
-        self.map(address);
-        self.map((address & !(CELL - 1)) + CELL);
+    /// after it. Their copy numbers (0-based) go into `named`.
+    fn name(&mut self, address: u64, named: &mut Vec<usize>) {
+        for at in [address, (address & !(CELL - 1)) + CELL] {
+            self.map(at);
+            if let Some(n) = self.copy_of(at)
+                && !named.contains(&n)
+            {
+                named.push(n);
+            }
+        }
+    }
+
+    /// The (0-based) number of the copy holding `address`'s page, if any.
+    fn copy_of(&self, address: u64) -> Option<usize> {
+        let page = address / PAGE;
+        if page >= u64::from(MEMORY_PAGES) - 1 {
+            return None;
+        }
+        // SAFETY: inside the directory's mapping.
+        let n = unsafe { self.directory.1.add(page as usize * 2).read() };
+        (n != 0).then(|| n as usize - 1)
     }
 }
+
+/// `VICTORY_MEMORY_WRITES=named` (experimental): a dispatch declares written
+/// only the copies its root views and root constants name, not every
+/// numbered copy. Each declared copy is snapshotted before the submission
+/// and compared after it, which for every numbered copy cost about 1.9 s a
+/// frame once the structure builder ran. What a shader stores through a
+/// pointer it read out of memory, into a copy nothing named, is then not
+/// copied back into title memory.
+fn writes_named_only() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        let on = std::env::var("VICTORY_MEMORY_WRITES").is_ok_and(|v| v == "named");
+        if on {
+            tracing::info!("title memory by address: only the copies a dispatch names are declared written (VICTORY_MEMORY_WRITES=named)");
+        }
+        on
+    })
+}
+
+/// `first_use` keys for [`writes_named_only`]: one per copy, below the
+/// list's other keys here.
+const NAMED_WRITE: usize = usize::MAX - 0x1000;
 
 /// Before a draw whose shader reads title memory by address: what its
 /// root arguments name gets its copies (`addresses`: its root views;
@@ -258,8 +297,9 @@ pub(crate) fn ready(
         m.take_faults();
     }
     let numbered = m.copies.len();
+    let mut named = Vec::new();
     for &address in addresses {
-        m.name(address);
+        m.name(address, &mut named);
     }
     // A title address in two constants (low dword, then bits 32 to 39), or
     // in one in 256-byte units. A constant that only looks like one names
@@ -269,10 +309,10 @@ pub(crate) fn ready(
             && (1..=0xFF).contains(&high)
             && c >= 0x1_0000
         {
-            m.name(u64::from(c) | u64::from(high) << 32);
+            m.name(u64::from(c) | u64::from(high) << 32, &mut named);
         }
         if c >= 0x0100_0000 {
-            m.name(u64::from(c) << 8);
+            m.name(u64::from(c) << 8, &mut named);
         }
     }
     let key = std::ptr::from_ref(heap) as usize;
@@ -298,12 +338,19 @@ pub(crate) fn ready(
     const WRITE: usize = usize::MAX - 0x6e;
     let first_read = list.first_use(READ);
     let first_write = writes && list.first_use(WRITE);
+    let named_only = writes_named_only();
     for (n, shadow) in m.copies.iter().enumerate() {
         let (start, len) = shadow.span();
         if first_read || n >= numbered {
             shadow.refresh(list, start, len);
         }
-        if writes && (first_write || n >= numbered) {
+        let declare = if named_only {
+            // Once per list for each copy a dispatch of it names.
+            named.contains(&n) && list.first_use(NAMED_WRITE - n)
+        } else {
+            first_write || n >= numbered
+        };
+        if writes && declare {
             shadow.gpu_writes(list, start, len);
         }
     }

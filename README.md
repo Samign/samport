@@ -72,6 +72,7 @@ powershell -ExecutionPolicy Bypass -File scripts\debug.ps1 -Game "<your game fol
 | `-TexturePct N` / `VICTORY_TEXTURE_PCT` (50-98, default 90) | share of the card's memory budget in use before textures picked by index wait; a `card memory for texture copies` line every 5 s shows budget, use and texture copies |
 | `-Builder` | runs the ray-tracing structure builder in quarantine (`VICTORY_BVH_BUILDER=1 VICTORY_BVH_QUARANTINE=1`); a run that keeps it off names each program missing |
 | `-FirstLaneLocal` / `VICTORY_FIRSTLANE_LOCAL=1` | approximate: a first-lane read where not every lane runs, in a 64-lane program split into two 32-lane halves, takes each half's own first lane. Lets all 53 builder programs translate. **Only with quarantine** |
+| `-NamedWrites` / `VICTORY_MEMORY_WRITES=named` | experimental: a shader that uses raw addresses declares written only the memory its dispatch names, not every copy; with the builder on, snapshots of every copy cost ~1.9 s a frame. Stores through pointers read out of memory into unnamed copies are then not copied back |
 | `-NoQuarantine` | builder output reaches game memory. **Do not use yet**: with `-FirstLaneLocal` the game crashed within seconds, reading float infinities as pointers |
 | `-WaveWhy` / `VICTORY_WAVE_WHY=1` | prints why each 64-lane retry fails (`WAVE64-RETRY`); part of the shader cache key |
 | `VICTORY_CARD_BUFFERS_MB=0` | keeps the game's large buffers out of card memory (more room for textures, likely slower) |
@@ -88,6 +89,10 @@ or a view that could not be mapped or committed).
   quarantine), but frames go from ~0.45 s to ~4 s; lighting does not change yet
   (five compute pipelines are still refused by the driver, and some trace programs
   do not translate).
+- With the builder on, the frame is mostly CPU bookkeeping (card ~12% busy):
+  snapshots of every memory copy a raw-address shader might write (~1.9 s), copy-back
+  (~1.5 s). Texture uploads are capped per frame, so at 4 s frames the queue grows and
+  textures (e.g. clothing) go missing. Use `-Builder` only for testing.
 - Shaders saved with `VICTORY_SHADER_SAVE=<dir>` for study must stay outside
   the repository (docs/asset-policy.md).
 
