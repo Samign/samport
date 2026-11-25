@@ -75,6 +75,9 @@ powershell -ExecutionPolicy Bypass -File scripts\debug.ps1 -Game "<your game fol
 | `-NamedWrites` / `VICTORY_MEMORY_WRITES=named` | experimental: a shader that uses raw addresses declares written only the memory its dispatch names, not every copy; with the builder on, snapshots of every copy cost ~1.9 s a frame. Stores through pointers read out of memory into unnamed copies are then not copied back |
 | `-NoQuarantine` | builder output reaches game memory. **Do not use yet**: with `-FirstLaneLocal` the game crashed within seconds, reading float infinities as pointers |
 | `-WaveWhy` / `VICTORY_WAVE_WHY=1` | prints why each 64-lane retry fails (`WAVE64-RETRY`); part of the shader cache key |
+| `-InPlace 1` / `VICTORY_INPLACE=1` | zero-copy (already in the code, off by default): game memory outside buffers is opened as a host heap the card reads directly, instead of being copied (~6.4 GB of copies in a builder run). Locks up to `VICTORY_INPLACE_MB` (4096) of it into RAM. A `title memory in place` line every 10 s says what was placed and what was turned down |
+| `-InPlace 2` | also the game's buffers (not the big ones in card memory). Not with `-Fast`/late wait |
+| `-InPlaceProbe` / `VICTORY_INPLACE_PROBE=1` | asks the driver what it accepts in place; logs `in place probe` lines |
 | `VICTORY_CARD_BUFFERS_MB=0` | keeps the game's large buffers out of card memory (more room for textures, likely slower) |
 
 A failed DirectStorage write into physical pages now says why (an unknown page,

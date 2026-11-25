@@ -11,6 +11,9 @@
 #   ... -Builder -FirstLaneLocal       # approximate first-lane reads so the 3 missing builder programs translate
 #   ... -Builder -FirstLaneLocal -NoQuarantine   # DO NOT USE yet: crashed the game (builder output landed on game pointers)
 #   ... -Builder -FirstLaneLocal -NamedWrites    # experimental: snapshot only memory a dispatch names (much less CPU work)
+#   ... -InPlace 1                     # zero-copy: memory outside buffers is shared with the card instead of copied
+#   ... -InPlace 2                     # also the game's buffers (not with -Fast)
+#   ... -InPlaceProbe                  # ask the driver what in-place memory it accepts (logs "in place probe")
 #   ... -Builder -WaveWhy -WaveWide    # same, plus the risky two-host-wave form (can hang the GPU)
 param(
     [Parameter(Mandatory = $true)][string]$Game,
@@ -27,13 +30,17 @@ param(
     [switch]$Fast,
     [switch]$FirstLaneLocal,
     [switch]$NoQuarantine,
-    [switch]$NamedWrites
+    [switch]$NamedWrites,
+    [int]$InPlace = 0,
+    [int]$InPlaceMB = 0,
+    [switch]$InPlaceProbe
 )
 
 foreach ($v in "VICTORY_KEYS", "VICTORY_CAPTURE", "VICTORY_CAPTURE_FRAMES", "VICTORY_DUMP_TARGETS",
                "VICTORY_BVH_BUILDER", "VICTORY_BVH_QUARANTINE", "VICTORY_RELAY", "VICTORY_LATE_WAIT",
                "VICTORY_WIDE_BACK", "VICTORY_TEXTURE_PCT", "VICTORY_TEXTURE_BUDGET_MB",
-               "VICTORY_WAVE_WHY", "VICTORY_WAVE_WIDE", "VICTORY_FIRSTLANE_LOCAL", "VICTORY_MEMORY_WRITES") {
+               "VICTORY_WAVE_WHY", "VICTORY_WAVE_WIDE", "VICTORY_FIRSTLANE_LOCAL", "VICTORY_MEMORY_WRITES",
+               "VICTORY_INPLACE", "VICTORY_INPLACE_MB", "VICTORY_INPLACE_PROBE") {
     Remove-Item "Env:$v" -ErrorAction SilentlyContinue
 }
 New-Item -ItemType Directory -Force $Cache, $Data | Out-Null
@@ -44,6 +51,13 @@ $env:VICTORY_LOG       = $Filter
 if ($Builder)  { $env:VICTORY_BVH_BUILDER = "1"; if (-not $NoQuarantine) { $env:VICTORY_BVH_QUARANTINE = "1" } }
 if ($WaveWhy)  { $env:VICTORY_WAVE_WHY = "1" }
 if ($WaveWide) { $env:VICTORY_WAVE_WIDE = "1" }
+if ($InPlace -gt 0) {
+    # Level 2 must not be combined with late wait (crates/victory-gpu/src/inplace.rs).
+    if ($InPlace -ge 2 -and ($Fast -or $env:VICTORY_LATE_WAIT)) { Write-Host "-InPlace 2 cannot be combined with -Fast / VICTORY_LATE_WAIT" -ForegroundColor Red; exit 1 }
+    $env:VICTORY_INPLACE = "$InPlace"
+}
+if ($InPlaceMB -gt 0) { $env:VICTORY_INPLACE_MB = "$InPlaceMB" }
+if ($InPlaceProbe) { $env:VICTORY_INPLACE_PROBE = "1" }
 if ($NamedWrites) { $env:VICTORY_MEMORY_WRITES = "named" }
 if ($FirstLaneLocal) { $env:VICTORY_FIRSTLANE_LOCAL = "1" }
 if ($Fast)     { $env:VICTORY_RELAY = "2" }
@@ -65,7 +79,7 @@ if (-not $found) {
 }
 $Exe = (Resolve-Path $found).Path
 Write-Host "exe: $Exe`ncache: $Cache`nlog: $Log"
-Write-Host "builder=$([bool]$Builder) quarantine=$([bool]($Builder -and -not $NoQuarantine)) firstlane=$([bool]$FirstLaneLocal) namedwrites=$([bool]$NamedWrites) wavewhy=$([bool]$WaveWhy) wavewide=$([bool]$WaveWide) fast=$([bool]$Fast) texpct=$TexturePct texbudget=$TextureBudgetMB"
+Write-Host "builder=$([bool]$Builder) quarantine=$([bool]($Builder -and -not $NoQuarantine)) firstlane=$([bool]$FirstLaneLocal) namedwrites=$([bool]$NamedWrites) inplace=$InPlace wavewhy=$([bool]$WaveWhy) wavewide=$([bool]$WaveWide) fast=$([bool]$Fast) texpct=$TexturePct texbudget=$TextureBudgetMB"
 
 # (A first "NativeCommandError" line in the log is only PowerShell wrapping stderr; harmless.)
 $env:NO_COLOR = "1"
@@ -77,7 +91,7 @@ $patterns = @(
     "builder", "host pipeline refused", "host mesh pipeline", "WAVE64-RETRY",
     "converter shader", "dropped .* without a host pipeline: ", "library saved",
     "ms/frame", "textures picked by index", "device removed", "ERROR",
-    "program without a host pipeline", "dstorage", "black frame", "enables the", "buffer view", "constant buffer not", "does not translate"
+    "program without a host pipeline", "in place", "copystat: memory: ", "dstorage", "black frame", "enables the", "buffer view", "constant buffer not", "does not translate"
 ) -join "|"
 Select-String -Path $Log -Pattern $patterns |
     ForEach-Object { $_.Line.Trim() } |
