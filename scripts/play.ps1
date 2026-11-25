@@ -3,7 +3,8 @@ param(
     [Parameter(Mandatory = $true)][string]$Game,
     [string]$Cache = "$env:LOCALAPPDATA\ztrx\cache",
     [string]$Data = "$env:LOCALAPPDATA\ztrx\data",
-    [string]$Exe = ""
+    [string]$Exe = "",
+    [int]$InPlace = 1   # zero-copy for memory outside buffers (VICTORY_INPLACE); 0 turns it off
 )
 foreach ($v in "VICTORY_KEYS", "VICTORY_CAPTURE", "VICTORY_CAPTURE_FRAMES", "VICTORY_DUMP_TARGETS") {
     Remove-Item "Env:$v" -ErrorAction SilentlyContinue
@@ -16,6 +17,7 @@ if (-not (Test-Path $Exe -PathType Leaf)) {
     exit 1
 }
 New-Item -ItemType Directory -Force $Cache, $Data | Out-Null
+if ($InPlace -gt 0) { $env:VICTORY_INPLACE = "$InPlace" } else { Remove-Item Env:VICTORY_INPLACE -ErrorAction SilentlyContinue }
 $env:VICTORY_CACHE_DIR = $Cache
 $env:VICTORY_DATA_DIR = $Data
 & $Exe run $Game --execute 2>&1 | Out-File "$env:TEMP\ztrx.log" -Encoding utf8

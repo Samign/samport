@@ -11,10 +11,11 @@
 #   ... -Builder -FirstLaneLocal       # approximate first-lane reads so the 3 missing builder programs translate
 #   ... -Builder -FirstLaneLocal -NoQuarantine   # DO NOT USE yet: crashed the game (builder output landed on game pointers)
 #   ... -Builder -FirstLaneLocal -NamedWrites    # experimental: snapshot only memory a dispatch names (much less CPU work)
-#   ... -InPlace 1                     # zero-copy: memory outside buffers is shared with the card instead of copied
+#   ... -InPlace 0                     # turn off zero-copy (on by default: memory outside buffers is shared with the card, not copied)
 #   ... -InPlace 2                     # also the game's buffers (not with -Fast)
 #   ... -InPlaceProbe                  # ask the driver what in-place memory it accepts (logs "in place probe")
 #   ... -GpuTiming                     # rank GPU time by pipeline ("the card's time by command"); frames get slower
+#   ... -GpuTiming -BarrierTest indirect   # TIMING ONLY: how much the ~12,000 GPU waits around indirect commands cost
 #   ... -Builder -WaveWhy -WaveWide    # same, plus the risky two-host-wave form (can hang the GPU)
 param(
     [Parameter(Mandatory = $true)][string]$Game,
@@ -32,10 +33,11 @@ param(
     [switch]$FirstLaneLocal,
     [switch]$NoQuarantine,
     [switch]$NamedWrites,
-    [int]$InPlace = 0,
+    [int]$InPlace = 1,                                # 1 (default): zero-copy for memory outside buffers; 0 off
     [int]$InPlaceMB = 0,
     [switch]$InPlaceProbe,
-    [switch]$GpuTiming
+    [switch]$GpuTiming,
+    [string]$BarrierTest = ""
 )
 
 foreach ($v in "VICTORY_KEYS", "VICTORY_CAPTURE", "VICTORY_CAPTURE_FRAMES", "VICTORY_DUMP_TARGETS",
@@ -43,7 +45,7 @@ foreach ($v in "VICTORY_KEYS", "VICTORY_CAPTURE", "VICTORY_CAPTURE_FRAMES", "VIC
                "VICTORY_WIDE_BACK", "VICTORY_TEXTURE_PCT", "VICTORY_TEXTURE_BUDGET_MB",
                "VICTORY_WAVE_WHY", "VICTORY_WAVE_WIDE", "VICTORY_FIRSTLANE_LOCAL", "VICTORY_MEMORY_WRITES",
                "VICTORY_INPLACE", "VICTORY_INPLACE_MB", "VICTORY_INPLACE_PROBE",
-               "VICTORY_GPU_TIMING", "VICTORY_D3D12_DRED") {
+               "VICTORY_GPU_TIMING", "VICTORY_D3D12_DRED", "VICTORY_BARRIER_TEST") {
     Remove-Item "Env:$v" -ErrorAction SilentlyContinue
 }
 New-Item -ItemType Directory -Force $Cache, $Data | Out-Null
@@ -62,6 +64,10 @@ if ($InPlace -gt 0) {
 if ($GpuTiming) {
     # Each list runs and is timed on its own (slower overall); DRED notes each command's pipeline.
     $env:VICTORY_GPU_TIMING = "1"; $env:VICTORY_D3D12_DRED = "1"
+}
+if ($BarrierTest) {
+    # TIMING ONLY: leaves GPU waits out (indirect | groups | both); expect glitches.
+    $env:VICTORY_BARRIER_TEST = $BarrierTest
 }
 if ($InPlaceMB -gt 0) { $env:VICTORY_INPLACE_MB = "$InPlaceMB" }
 if ($InPlaceProbe) { $env:VICTORY_INPLACE_PROBE = "1" }
@@ -86,7 +92,7 @@ if (-not $found) {
 }
 $Exe = (Resolve-Path $found).Path
 Write-Host "exe: $Exe`ncache: $Cache`nlog: $Log"
-Write-Host "builder=$([bool]$Builder) quarantine=$([bool]($Builder -and -not $NoQuarantine)) firstlane=$([bool]$FirstLaneLocal) namedwrites=$([bool]$NamedWrites) inplace=$InPlace gputiming=$([bool]$GpuTiming) wavewhy=$([bool]$WaveWhy) wavewide=$([bool]$WaveWide) fast=$([bool]$Fast) texpct=$TexturePct texbudget=$TextureBudgetMB"
+Write-Host "builder=$([bool]$Builder) quarantine=$([bool]($Builder -and -not $NoQuarantine)) firstlane=$([bool]$FirstLaneLocal) namedwrites=$([bool]$NamedWrites) inplace=$InPlace gputiming=$([bool]$GpuTiming) barriertest=$BarrierTest wavewhy=$([bool]$WaveWhy) wavewide=$([bool]$WaveWide) fast=$([bool]$Fast) texpct=$TexturePct texbudget=$TextureBudgetMB"
 
 # (A first "NativeCommandError" line in the log is only PowerShell wrapping stderr; harmless.)
 $env:NO_COLOR = "1"
