@@ -78,6 +78,7 @@ powershell -ExecutionPolicy Bypass -File scripts\debug.ps1 -Game "<your game fol
 | `-InPlace 1` / `VICTORY_INPLACE=1` | zero-copy (already in the code, off by default): game memory outside buffers is opened as a host heap the card reads directly, instead of being copied (~6.4 GB of copies in a builder run). Locks up to `VICTORY_INPLACE_MB` (4096) of it into RAM. A `title memory in place` line every 10 s says what was placed and what was turned down |
 | `-InPlace 2` | also the game's buffers (not the big ones in card memory). Not with `-Fast`/late wait |
 | `-InPlaceProbe` / `VICTORY_INPLACE_PROBE=1` | asks the driver what it accepts in place; logs `in place probe` lines |
+| `-GpuTiming` / `VICTORY_GPU_TIMING=1 VICTORY_D3D12_DRED=1` | times every command on the card and ranks them by pipeline (`the card's time by command`); runs slower |
 | `VICTORY_CARD_BUFFERS_MB=0` | keeps the game's large buffers out of card memory (more room for textures, likely slower) |
 
 A failed DirectStorage write into physical pages now says why (an unknown page,
@@ -100,6 +101,10 @@ or a view that could not be mapped or committed).
   ~37 ms, copy-back ~1.5 s -> ~72 ms). The process then holds ~24 GB of private memory;
   on a PC with little free memory left, Windows pages heavily and the window may show
   as not responding. Raise the paging file and close other programs.
+- `-InPlace 2` (no builder): CPU preparing ~190 -> ~98 ms, private memory ~24 -> ~20 GB,
+  copies ~7.4 -> ~4.1 GB, but GPU time ~250 -> ~394 ms (card ~72% busy): only ~580 MB went
+  in place; the game's page pool (6.1 GiB section made `SEC_RESERVE`) is turned down. The
+  frame is now GPU-bound.
 - Shaders saved with `VICTORY_SHADER_SAVE=<dir>` for study must stay outside
   the repository (docs/asset-policy.md).
 

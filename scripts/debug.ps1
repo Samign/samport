@@ -14,6 +14,7 @@
 #   ... -InPlace 1                     # zero-copy: memory outside buffers is shared with the card instead of copied
 #   ... -InPlace 2                     # also the game's buffers (not with -Fast)
 #   ... -InPlaceProbe                  # ask the driver what in-place memory it accepts (logs "in place probe")
+#   ... -GpuTiming                     # rank GPU time by pipeline ("the card's time by command"); frames get slower
 #   ... -Builder -WaveWhy -WaveWide    # same, plus the risky two-host-wave form (can hang the GPU)
 param(
     [Parameter(Mandatory = $true)][string]$Game,
@@ -33,14 +34,16 @@ param(
     [switch]$NamedWrites,
     [int]$InPlace = 0,
     [int]$InPlaceMB = 0,
-    [switch]$InPlaceProbe
+    [switch]$InPlaceProbe,
+    [switch]$GpuTiming
 )
 
 foreach ($v in "VICTORY_KEYS", "VICTORY_CAPTURE", "VICTORY_CAPTURE_FRAMES", "VICTORY_DUMP_TARGETS",
                "VICTORY_BVH_BUILDER", "VICTORY_BVH_QUARANTINE", "VICTORY_RELAY", "VICTORY_LATE_WAIT",
                "VICTORY_WIDE_BACK", "VICTORY_TEXTURE_PCT", "VICTORY_TEXTURE_BUDGET_MB",
                "VICTORY_WAVE_WHY", "VICTORY_WAVE_WIDE", "VICTORY_FIRSTLANE_LOCAL", "VICTORY_MEMORY_WRITES",
-               "VICTORY_INPLACE", "VICTORY_INPLACE_MB", "VICTORY_INPLACE_PROBE") {
+               "VICTORY_INPLACE", "VICTORY_INPLACE_MB", "VICTORY_INPLACE_PROBE",
+               "VICTORY_GPU_TIMING", "VICTORY_D3D12_DRED") {
     Remove-Item "Env:$v" -ErrorAction SilentlyContinue
 }
 New-Item -ItemType Directory -Force $Cache, $Data | Out-Null
@@ -55,6 +58,10 @@ if ($InPlace -gt 0) {
     # Level 2 must not be combined with late wait (crates/victory-gpu/src/inplace.rs).
     if ($InPlace -ge 2 -and ($Fast -or $env:VICTORY_LATE_WAIT)) { Write-Host "-InPlace 2 cannot be combined with -Fast / VICTORY_LATE_WAIT" -ForegroundColor Red; exit 1 }
     $env:VICTORY_INPLACE = "$InPlace"
+}
+if ($GpuTiming) {
+    # Each list runs and is timed on its own (slower overall); DRED notes each command's pipeline.
+    $env:VICTORY_GPU_TIMING = "1"; $env:VICTORY_D3D12_DRED = "1"
 }
 if ($InPlaceMB -gt 0) { $env:VICTORY_INPLACE_MB = "$InPlaceMB" }
 if ($InPlaceProbe) { $env:VICTORY_INPLACE_PROBE = "1" }
@@ -79,7 +86,7 @@ if (-not $found) {
 }
 $Exe = (Resolve-Path $found).Path
 Write-Host "exe: $Exe`ncache: $Cache`nlog: $Log"
-Write-Host "builder=$([bool]$Builder) quarantine=$([bool]($Builder -and -not $NoQuarantine)) firstlane=$([bool]$FirstLaneLocal) namedwrites=$([bool]$NamedWrites) inplace=$InPlace wavewhy=$([bool]$WaveWhy) wavewide=$([bool]$WaveWide) fast=$([bool]$Fast) texpct=$TexturePct texbudget=$TextureBudgetMB"
+Write-Host "builder=$([bool]$Builder) quarantine=$([bool]($Builder -and -not $NoQuarantine)) firstlane=$([bool]$FirstLaneLocal) namedwrites=$([bool]$NamedWrites) inplace=$InPlace gputiming=$([bool]$GpuTiming) wavewhy=$([bool]$WaveWhy) wavewide=$([bool]$WaveWide) fast=$([bool]$Fast) texpct=$TexturePct texbudget=$TextureBudgetMB"
 
 # (A first "NativeCommandError" line in the log is only PowerShell wrapping stderr; harmless.)
 $env:NO_COLOR = "1"
@@ -91,7 +98,7 @@ $patterns = @(
     "builder", "host pipeline refused", "host mesh pipeline", "WAVE64-RETRY",
     "converter shader", "dropped .* without a host pipeline: ", "library saved",
     "ms/frame", "textures picked by index", "device removed", "ERROR",
-    "program without a host pipeline", "in place", "copystat: memory: ", "dstorage", "black frame", "enables the", "buffer view", "constant buffer not", "does not translate"
+    "program without a host pipeline", "in place", "copystat: memory: ", "time by command", "the card's clock", "dstorage", "black frame", "enables the", "buffer view", "constant buffer not", "does not translate"
 ) -join "|"
 Select-String -Path $Log -Pattern $patterns |
     ForEach-Object { $_.Line.Trim() } |
