@@ -76,6 +76,8 @@ powershell -ExecutionPolicy Bypass -File scripts\debug.ps1 -Game "<your game fol
 | `-NoQuarantine` | builder output reaches game memory. **Do not use yet**: with `-FirstLaneLocal` the game crashed within seconds, reading float infinities as pointers |
 | `-WaveWhy` / `VICTORY_WAVE_WHY=1` | prints why each 64-lane retry fails (`WAVE64-RETRY`); part of the shader cache key |
 | overlap / `VICTORY_RELAY=2` | **default in `play.ps1` (`-Relay 0` off) and `debug.ps1` (`-NoFast` off)**: the card runs a submission while the CPU prepares the next |
+| `VICTORY_WIDE_BACK=1` | **default in both scripts** (`-WideBack 0` / `-NoWideBack` off): snapshots and compares of shader-written ranges run on several threads |
+| `-CardBuffersMinMB 1 -CardBuffersMB 1024` | the card, not the CPU, looks for shader writes in buffers of 1 MiB or more; uses VRAM that textures also need |
 | `-InPlace 1` / `VICTORY_INPLACE=1` | **default in `play.ps1` and `debug.ps1`** (`-InPlace 0` turns it off). Zero-copy (in the code upstream, off by default there): game memory outside buffers is opened as a host heap the card reads directly, instead of being copied (~6.4 GB of copies in a builder run). Locks up to `VICTORY_INPLACE_MB` (4096) of it into RAM. A `title memory in place` line every 10 s says what was placed and what was turned down |
 | `-InPlace 2` | also the game's buffers (not the big ones in card memory). Turns overlap off (not compatible with late wait) |
 | `-InPlaceProbe` / `VICTORY_INPLACE_PROBE=1` | asks the driver what it accepts in place; logs `in place probe` lines |
@@ -125,6 +127,9 @@ or a view that could not be mapped or committed).
   the game's ray-traversal programs walking the prebuilt structures, already running without
   the builder. `cfd83392ec9ae408` (250 instructions) and `cb6adcc6da2613ff` (~760) are plain
   compute; why the small one takes ~16 ms is not known yet.
+- Defaults (`-InPlace 1` + overlap): 290-400 ms a frame (2.5-3.5 fps), GPU ~138 ms, card ~78%
+  busy; the CPU still snapshots and compares ~350 MB of buffer copies a frame on one
+  thread, which `VICTORY_WIDE_BACK=1` (now default) spreads over several.
 - Shaders saved with `VICTORY_SHADER_SAVE=<dir>` for study must stay outside
   the repository (docs/asset-policy.md).
 
