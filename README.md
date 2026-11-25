@@ -87,7 +87,7 @@ powershell -ExecutionPolicy Bypass -File scripts\debug.ps1 -Game "<your game fol
 | `-SaveShaders <dir>` / `VICTORY_SHADER_SAVE` | saves each shader as given and as translated, by hash; the folder must be outside the repository |
 | `-TextureIdleMS N` / `VICTORY_TEXTURE_IDLE_MS` | **1000 in both scripts**: how long an unused texture copy is kept on the card (default 5000, at least 250): shorter frees VRAM for textures still waiting |
 | `-DisplayMode 1920x1080` / `VICTORY_DISPLAY_MODE` | **default in both scripts** (`-DisplayMode 3840x2160` for the layer's own): the TV size the console reports (layer default 3840x2160). If the game renders for the mode it is given, smaller means less GPU work and smaller render targets |
-| `-Console series-s` | the game believes it runs on an Xbox Series S (`--console series-s`), which it uses to pick lower resolution, textures and memory budgets (about 7.8 GB of title memory instead of 13.5 GB) |
+| `-Console series-s` | the game believes it runs on an Xbox Series S (`--console series-s`). **Does not work yet**: in that mode the game loads `amd_fidelityfx_upscaler_xbox.dll`, which the host policy refuses, and it stays on a black screen (11 draws a frame) |
 | `VICTORY_CARD_BUFFERS_MB=0` | keeps the game's large buffers out of card memory (more room for textures, likely slower) |
 
 A failed DirectStorage write into physical pages now says why (an unknown page,
@@ -154,6 +154,8 @@ or a view that could not be mapped or committed).
 - GPU timing at these defaults: ~182 ms of commands a frame, no single hot spot: ~6,300
   indirect mesh draws take ~126 ms (20-30 us each), the heaviest compute dispatch ~8 ms. The
   ray-traversal programs were not among the top in this scene.
+- `-Console series-s`: black screen; the game asks for AMD's FidelityFX upscaler DLL, refused
+  by the host policy. Series X stays the default.
 - Shaders saved with `VICTORY_SHADER_SAVE=<dir>` for study must stay outside
   the repository (docs/asset-policy.md).
 
