@@ -58,6 +58,39 @@ time on the test machines. Set them in PowerShell before running the script.
 
 Diagnostics build: `cargo build --profile diag -p victory --features diagnostics`
 
+## samport additions (diagnostics)
+
+`scripts\debug.ps1` runs the diagnostics build with the log shown and saved in
+`%TEMP%` (`ztrx-diag.log`, plus `-summary.txt` and `-tail.txt`):
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\debug.ps1 -Game "<your game folder>\<the game's exe>"
+```
+
+| Switch / variable | Effect |
+|---|---|
+| `-TexturePct N` / `VICTORY_TEXTURE_PCT` (50-98, default 90) | share of the card's memory budget in use before textures picked by index wait; a `card memory for texture copies` line every 5 s shows budget, use and texture copies |
+| `-Builder` | runs the ray-tracing structure builder in quarantine (`VICTORY_BVH_BUILDER=1 VICTORY_BVH_QUARANTINE=1`); a run that keeps it off names each program missing |
+| `-FirstLaneLocal` / `VICTORY_FIRSTLANE_LOCAL=1` | approximate: a first-lane read where not every lane runs, in a 64-lane program split into two 32-lane halves, takes each half's own first lane. Lets all 53 builder programs translate. **Only with quarantine** |
+| `-NoQuarantine` | builder output reaches game memory. **Do not use yet**: with `-FirstLaneLocal` the game crashed within seconds, reading float infinities as pointers |
+| `-WaveWhy` / `VICTORY_WAVE_WHY=1` | prints why each 64-lane retry fails (`WAVE64-RETRY`); part of the shader cache key |
+| `VICTORY_CARD_BUFFERS_MB=0` | keeps the game's large buffers out of card memory (more room for textures, likely slower) |
+
+A failed DirectStorage write into physical pages now says why (an unknown page,
+or a view that could not be mapped or committed).
+
+### Findings so far (RTX 3070 Ti, 8 GB)
+
+- Shader cache works: after the first run nearly every pipeline loads from the library.
+- See-through textures: the card fills up (about 6.7 GB used of a ~7 GB budget, of
+  which only ~2.2 GB are texture copies), after which textures picked by index wait.
+- Ray tracing: with `-Builder -FirstLaneLocal` all 53 builder programs run (in
+  quarantine), but frames go from ~0.45 s to ~4 s; lighting does not change yet
+  (five compute pipelines are still refused by the driver, and some trace programs
+  do not translate).
+- Shaders saved with `VICTORY_SHADER_SAVE=<dir>` for study must stay outside
+  the repository (docs/asset-policy.md).
+
 ## License
 
 GPL-3.0-or-later (see `LICENSE`). Based on VIctory (Marvisak), victory-fork (fxceless) and ztrx
