@@ -66,6 +66,19 @@ thread_local! {
     /// While a stage's tables are walked (`State::tables`): whether that
     /// stage's shader can store to buffers (`Translated::stores`).
     static STORES: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
+    /// While a dispatch is bound: whether a shader took the address of a
+    /// buffer view that is not there ([`State::host_word`]).
+    static MISSING_VIEW: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Whether a builder stage that takes the address of a buffer view that is
+/// not there still runs (`VICTORY_BVH_NULL_VIEWS=1`). Off: it would place
+/// its stores from address 0, and the stages after it read what it never
+/// wrote; with the builder out of quarantine the title then read pointers
+/// of 0xffffffffffffffff (the crash of the run after the approximate check).
+fn builder_null_views() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("VICTORY_BVH_NULL_VIEWS").is_some_and(|v| v == "1"))
 }
 
 /// Whether a buffer range a shader names through an unordered access view
@@ -836,6 +849,7 @@ impl State {
             _ => 0,
         };
         if address == 0 {
+            MISSING_VIEW.set(true);
             once!(slot, dword, "a shader takes the address of a buffer view that is not there: it reads 0");
         }
         if kind == USER_VIEW_ADDRESS {
@@ -1843,6 +1857,7 @@ impl State {
             once!("a dispatch with a graphics pipeline");
             return;
         }
+        MISSING_VIEW.set(false);
         if !self.bind(list, p, true) {
             DROPPED.fetch_add(1, Ordering::Relaxed);
             // A stage of the structure builder that cannot be bound is a
@@ -1850,6 +1865,13 @@ impl State {
             if crate::pipeline::is_builder(self.pipeline as This) {
                 crate::pipeline::builder_off("one of its dispatches could not be bound");
             }
+            return;
+        }
+        // A stage of the builder whose buffer view is not there: dropped,
+        // and the builder with it (its stages run all or none).
+        if MISSING_VIEW.take() && crate::pipeline::is_builder(self.pipeline as This) && !builder_null_views() {
+            DROPPED.fetch_add(1, Ordering::Relaxed);
+            crate::pipeline::builder_off("one of its stages takes the address of a buffer view that is not there");
             return;
         }
         #[cfg(feature = "diagnostics")]
@@ -2622,12 +2644,18 @@ impl State {
         if merging {
             self.capture = Some(Vec::new());
         }
-        let ran = match kind {
+        MISSING_VIEW.set(false);
+        let mut ran = match kind {
             DRAW | INDEXED => self.prepare(list, kind == INDEXED),
             MESH => self.prepare_for(list, false, true),
             DISPATCH => self.bind(list, p, true),
             _ => false,
         };
+        // (as in `dispatch`: a builder stage whose buffer view is not there)
+        if ran && MISSING_VIEW.take() && crate::pipeline::is_builder(self.pipeline as This) && !builder_null_views() {
+            crate::pipeline::builder_off("one of its stages takes the address of a buffer view that is not there");
+            ran = false;
+        }
         let captured = self.capture.take();
         if !ran {
             crate::indirect::done(list, &bounded);
