@@ -25,7 +25,7 @@ use crate::object::This;
 use crate::pipeline::host::HostPipeline;
 
 /// A root argument as the title set it.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Hash, PartialEq, Eq)]
 enum Root {
     #[default]
     None,
@@ -178,6 +178,11 @@ pub(crate) struct State {
     /// The indirect records clamped last, if later draws may still read
     /// them ([`windows`]).
     window: Option<Window>,
+    /// Title list calls recorded so far ([`crate::list`]'s `with_state`), and
+    /// the last indirect mesh draw: the call count at it, its state's hash,
+    /// its argument copy and offset (for [`note_mergeable`]).
+    pub(crate) calls: u64,
+    last_mesh: Option<(u64, u64, u64, u64)>,
     /// What the host list has: pipeline, root signature, heaps.
     host_pipeline: usize,
     /// Graphics, compute.
@@ -2444,6 +2449,28 @@ impl State {
             self.op_text(format!("indirect kind {kind} max {max} at {arguments:#x}"), kind == DISPATCH)
         });
         if kind == MESH {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            self.pipeline.hash(&mut h);
+            self.heaps.hash(&mut h);
+            self.graphics.hash(&mut h);
+            self.target_handles.hash(&mut h);
+            self.depth_handle.hash(&mut h);
+            for v in &self.viewports {
+                [v.TopLeftX, v.TopLeftY, v.Width, v.Height, v.MinDepth, v.MaxDepth].map(f32::to_bits).hash(&mut h);
+            }
+            for r in &self.scissors {
+                [r.left, r.top, r.right, r.bottom].hash(&mut h);
+            }
+            let hash = h.finish();
+            let (copy, at_args) = (args.id() as u64, offset);
+            let next = |&(_, _, c, o): &(u64, u64, u64, u64)| c == copy && at_args > o && at_args - o <= 256;
+            let (strict, loose) = match &self.last_mesh {
+                Some(last) if next(last) => (last.0 + 1 == self.calls, last.1 == hash),
+                _ => (false, false),
+            };
+            note_mergeable(strict, loose);
+            self.last_mesh = Some((self.calls, hash, copy, at_args));
             self.mesh_scissor(list, true);
         }
         // SAFETY: an open list with everything set; the scratch buffer and
@@ -2468,6 +2495,36 @@ impl State {
             DRAWN.fetch_add(1, Ordering::Relaxed);
         }
         true
+    }
+}
+
+/// Indirect mesh draws since the last line, and of them those the one before
+/// could have been merged with: with no title call between (`strict`), or
+/// with the same pipeline, heaps, root arguments, targets, viewports and
+/// scissors whatever came between (`loose`); both reading the next record of
+/// the same argument buffer. What a merging of such draws into one indirect
+/// call would save.
+static MERGE: [AtomicU64; 3] = [const { AtomicU64::new(0) }; 3];
+
+fn note_mergeable(strict: bool, loose: bool) {
+    MERGE[0].fetch_add(1, Ordering::Relaxed);
+    if strict {
+        MERGE[1].fetch_add(1, Ordering::Relaxed);
+    }
+    if loose {
+        MERGE[2].fetch_add(1, Ordering::Relaxed);
+    }
+    static AT: AtomicU64 = AtomicU64::new(0);
+    static FRAME: AtomicU64 = AtomicU64::new(0);
+    let now = crate::host::now_ms();
+    let last = AT.load(Ordering::Relaxed);
+    if now >= last + 5_000 && AT.compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed).is_ok() {
+        let frame = crate::frame::current();
+        let frames = frame.saturating_sub(FRAME.swap(frame, Ordering::Relaxed)).max(1) as f64;
+        let [all, strict, loose] = [0, 1, 2].map(|i| MERGE[i].swap(0, Ordering::Relaxed) as f64 / frames);
+        tracing::info!(
+            "indirect mesh draws per frame: {all:.0}; could join the one before: {strict:.0} with no title call between, {loose:.0} with the same state"
+        );
     }
 }
 

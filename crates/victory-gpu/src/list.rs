@@ -148,7 +148,9 @@ fn with_state(this: This, f: impl FnOnce(&crate::host::HostList, &mut crate::dra
     let started = std::time::Instant::now();
     // SAFETY: the title passes one of our lists.
     let state = unsafe { &(*this.cast::<List>()).state };
-    f(list, &mut state.lock().unwrap_or_else(|e| e.into_inner()));
+    let mut state = state.lock().unwrap_or_else(|e| e.into_inner());
+    state.calls += 1;
+    f(list, &mut state);
     #[cfg(feature = "diagnostics")]
     crate::copystat::recorded(started);
 }
