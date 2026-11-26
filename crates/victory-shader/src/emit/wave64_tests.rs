@@ -551,3 +551,131 @@ fn the_builders_child_sums_cross_the_halves_as_on_the_console() {
     assert!(wrong.is_empty(), "{} lanes differ:\n{}", wrong.len(), wrong.join("\n"));
     eprintln!("ran on the hardware device: the builder's child sums match the console in all 64 lanes");
 }
+
+/// Runs a wave64 test program of one console wave on the host GPU with a raw UAV of
+/// `dwords` and returns its contents (None: not run here).
+fn run_wave64(words: &[u32], dwords: u32) -> Option<Vec<u32>> {
+    let native = native(words);
+    let p = ir::build(&native.code, native.wave64, native.vgprs).expect("ir::build");
+    let shader = lowered(&native, &p, &HashSet::new()).expect("lower");
+    if let Ok(mut v) = validator::Validator::load(validator::Validator::default_path().as_deref()) {
+        let mut copy = shader.dxil.clone();
+        v.validate(&mut copy).expect("DXIL validation failed");
+    }
+    let _one = super::valu_tests::ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+    let Ok(host) = Host::new(false) else {
+        eprintln!("no SM 6.6 hardware device; not run");
+        return None;
+    };
+    let (root, pso) = match host.compute_pipeline(&shader) {
+        Ok(x) => x,
+        Err(e) => {
+            eprintln!("the hardware device does not take this program (waves of 32?): {e}; not run");
+            return None;
+        }
+    };
+    let ud = vec![0u32; shader.user_data_dwords().max(1) as usize];
+    let out = host
+        .dispatch(
+            &root,
+            &pso,
+            &Dispatch {
+                roots: vec![(0, Root::Constants(ud))],
+                views: &[View::RawUav(dwords)],
+                samplers: &[],
+                groups: [1, 1, 1],
+            },
+        )
+        .unwrap_or_else(|e| panic!("dispatch failed: {e}"));
+    Some(out[0].clone())
+}
+
+/// Builder stage 10 (`f6eb6498409ca974`) whole but for its loads and its buffers: each
+/// lane's four counts summed, an inclusive scan over the 64 lanes by `ds_swizzle` within
+/// each half and lane 31's total added to the upper half by `v_readlane` and a
+/// `v_cndmask` under the constant mask (0, -1); each lane stores its exclusive prefixes,
+/// and lane 63 the wave's total (at dword 256).
+#[test]
+fn the_builders_swizzle_scan_crosses_the_halves_as_on_the_console() {
+    let words = [
+        0x3604_0083, // v_and_b32 v2, 3, v0          (the four counts of lane t:
+        0x2C06_0083, // v_lshrrev_b32 v3, 3, v0       t & 3, t >> 3, 1, t & 5)
+        0x7E08_0281, // v_mov_b32 v4, 1
+        0x360A_0085, // v_and_b32 v5, 5, v0
+        0xBE8C_0381, // s_mov_b32 s12, 1             (the title's flag: lane 63 stores)
+        0x3412_0084, // v_lshlrev_b32 v9, 4, v0
+        // 0x048-0x180 as the title has them, s8 renamed s20
+        0xBE86_03FF, 0xAAAA_AAAA, 0xBE87_03FF, 0xAAAA_AAAA, 0x7D84_00BF,
+        0x4A06_0503, 0xD76D_0007, 0x040E_0905, 0xD8D4_001E, 0x0100_0007, 0xBF8C_C07F,
+        0xD501_0001, 0x001A_0280, 0xBE86_03FF, 0xCCCC_CCCC, 0xBE87_03FF, 0xCCCC_CCCC,
+        0x4A02_0F01, 0xD8D4_003C, 0x0600_0001, 0xBF8C_C07F, 0xD501_0006, 0x001A_0C80,
+        0xBE86_03FF, 0xF0F0_F0F0, 0xBE87_03FF, 0xF0F0_F0F0, 0x4A02_0306, 0xD8D4_0078,
+        0x0600_0001, 0xBF8C_C07F, 0xD501_0006, 0x001A_0C80, 0xBE86_03FF, 0xFF00_FF00,
+        0xBE87_03FF, 0xFF00_FF00, 0x4A02_0306, 0xD8D4_00F0, 0x0600_0001, 0xBF8C_C07F,
+        0xD501_0006, 0x001A_0C80, 0xBE86_03FF, 0xFFFF_0000, 0xBE87_03FF, 0xFFFF_0000,
+        0x4A02_0306, 0xD8D4_01E0, 0x0600_0001, 0xBF8C_C07F, 0xD501_0006, 0x001A_0C80,
+        0xBE86_0380, 0xBE87_03C1, 0x4A02_0306,
+        0xD760_0014, 0x0001_3F01, // v_readlane_b32 s20, v1, 31
+        0xD501_0006, 0x0018_2880, // v_cndmask_b32 v6, 0, s20, s[6:7]
+        0x8706_0C81, 0xBF06_8106, 0x4A02_0306, 0x8586_807E, 0x8786_066A, 0x4C0A_0F01,
+        0x4A0E_0705, 0x4A0C_0505, 0x4A10_0907,
+        0xE078_1000, 0x8002_0509, // buffer_store_dwordx4 v[5:8], v9, s[8:11], 0 offen
+        0xBE80_2406, // s_and_saveexec_b64 s[0:1], s[6:7]
+        0xE070_0400, 0x8002_0100, // buffer_store_dword v1, off, s[8:11], 0 offset:1024
+        0xBEFE_0400, // s_mov_b64 exec, s[0:1]
+    ];
+    let Some(out) = run_wave64(&words, 260) else { return };
+    let counts: Vec<[u32; 4]> = (0..64).map(|t| [t & 3, t >> 3, 1, t & 5]).collect();
+    let sums: Vec<u32> = counts.iter().map(|c| c.iter().sum()).collect();
+    let mut wrong = Vec::new();
+    for t in 0..64usize {
+        let e = sums[..t].iter().sum::<u32>();
+        let [a, b, c, _] = counts[t];
+        let want = [e, e + a, e + a + b, e + a + b + c];
+        let got = [out[4 * t], out[4 * t + 1], out[4 * t + 2], out[4 * t + 3]];
+        if got != want {
+            wrong.push(format!("lane {t}: got {got:?}, the console {want:?}"));
+        }
+    }
+    let total: u32 = sums.iter().sum();
+    if out[256] != total {
+        wrong.push(format!("lane 63's total: got {}, the console {total}", out[256]));
+    }
+    assert!(wrong.is_empty(), "{} values differ:\n{}", wrong.len(), wrong.join("\n"));
+    eprintln!("ran on the hardware device: stage 10's swizzle scan matches the console in all 64 lanes");
+}
+
+/// Builder stage 11 (`e63d22c4def9ba6a`, a radix sort's pass): a lane's bit as a 64-lane
+/// ballot (`v_cmp_ne_i32 s[0:1]`), its count (`s_bcnt1_i32_b64`) and each lane's rank among
+/// the set lanes below it (`v_mbcnt_lo` / `v_mbcnt_hi` of the ballot), in the title's words.
+/// The bit of lane t is bit 1 of t, and lane 47's and up are set too.
+#[test]
+fn the_builders_ballot_ranks_cross_the_halves_as_on_the_console() {
+    let words = [
+        0x2C16_0081, // v_lshrrev_b32 v11, 1, v0
+        0x3616_1681, // v_and_b32 v11, 1, v11
+        0x7D88_00AF, // v_cmp_gt_u32 vcc, 47, v0  (47 > t)
+        0x0216_16C1, // v_cndmask_b32 v11, -1, v11, vcc  (t >= 47: -1)
+        0xD485_0000, 0x0002_1680, // v_cmp_ne_i32 s[0:1], 0, v11
+        0xBE82_1000, // s_bcnt1_i32_b64 s2, s[0:1]
+        0xD765_000F, 0x0001_0000, // v_mbcnt_lo_u32_b32 v15, s0, 0
+        0xD766_000F, 0x0002_1E01, // v_mbcnt_hi_u32_b32 v15, s1, v15
+        0x341A_0084, // v_lshlrev_b32 v13, 4, v0
+        0x7E1C_0202, // v_mov_b32 v14, s2
+        0xE070_1000, 0x8002_0F0D, // buffer_store_dword v15, v13, s[8:11], 0 offen
+        0xE070_1004, 0x8002_0E0D, // ... v14 offset:4
+    ];
+    let Some(out) = run_wave64(&words, 256) else { return };
+    let set: Vec<bool> = (0..64).map(|t| t >= 47 || t >> 1 & 1 == 1).collect();
+    let count = set.iter().filter(|&&s| s).count() as u32;
+    let mut wrong = Vec::new();
+    for t in 0..64usize {
+        let rank = set[..t].iter().filter(|&&s| s).count() as u32;
+        let got = [out[4 * t], out[4 * t + 1]];
+        if got != [rank, count] {
+            wrong.push(format!("lane {t}: got {got:?}, the console {:?}", [rank, count]));
+        }
+    }
+    assert!(wrong.is_empty(), "{} lanes differ:\n{}", wrong.len(), wrong.join("\n"));
+    eprintln!("ran on the hardware device: stage 11's ballot ranks match the console in all 64 lanes");
+}
