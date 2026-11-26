@@ -129,6 +129,9 @@ pub(crate) struct Translated {
     /// How the translation is only approximate, if it is
     /// ([`victory_shader::emit::take_approximate`]).
     pub(crate) approximate: Option<String>,
+    /// A compute program's threads per group (`DispatchX` counted in
+    /// threads).
+    pub(crate) threads: Option<[u32; 3]>,
 }
 
 #[cfg(windows)]
@@ -191,6 +194,10 @@ fn translate(container: &[u8]) -> Result<Translated, String> {
     };
     let (host, approximate) = crate::shader_cache::host_shader(container)?;
     let stores = programs.is_empty() || programs.iter().any(stores);
+    let threads = programs.iter().find_map(|p| match &p.io {
+        victory_shader::native::StageIo::Cs(cs) if p.stage == HwStage::Cs => Some(cs.threads),
+        _ => None,
+    });
     let used = programs
         .into_iter()
         .find(|p| {
@@ -201,7 +208,7 @@ fn translate(container: &[u8]) -> Result<Translated, String> {
         })
         .map(|p| p.used)
         .unwrap_or_default();
-    Ok(Translated { host, used, stores, approximate })
+    Ok(Translated { host, used, stores, approximate, threads })
 }
 
 /// The compute pipelines of the console's ray-tracing structure builder

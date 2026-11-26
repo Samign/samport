@@ -86,10 +86,31 @@ enum Stop {
     Fail(ShaderError),
 }
 
+/// Whether the program's lanes past a dispatch's count of threads leave at
+/// once (`shader.rs` `USER_DISPATCH_THREADS_X`): the structure builder's
+/// one-dimensional programs, which the title dispatches counted in threads.
+/// `VICTORY_THREAD_DIMENSIONS=0` turns it off.
+/// After avatarmanz/VIctory-7900XTX (`lower_counted`) and DexNom/VIctory
+/// bc3cd4b0. That fork leaves out wave64 programs on hosts of 32-lane waves;
+/// here they count too, each host wave first emptying its half's exchange
+/// dword, so that a half whose lanes all left gives nothing (0) to the
+/// exchanges of the other.
+fn counted(parts: &Parts) -> bool {
+    let crate::native::StageIo::Cs(cs) = &parts.native.io else {
+        return false;
+    };
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("VICTORY_THREAD_DIMENSIONS").is_none_or(|v| v != "0"))
+        && cs.threads[0] > 1
+        && cs.threads[1..] == [1, 1]
+        && crate::spill::is_spilled(parts.native)
+}
+
 pub(crate) fn lower(parts: &Parts) -> Result<Lowered, ShaderError> {
     let mut bad = HashMap::new();
+    let counted = counted(parts);
     loop {
-        match Lower::new(parts, &bad).run() {
+        match Lower::new(parts, &bad).run(counted) {
             Ok(l) => return Ok(l),
             Err(Stop::Retry(v, why)) => {
                 if bad.insert(v, why).is_some() {
@@ -2149,8 +2170,46 @@ impl<'a> Lower<'a> {
         Ok(self.s.m.bin(c, Bin::Or, first, total))
     }
 
-    fn run(mut self) -> Result<Lowered, Stop> {
+    fn run(mut self, counted: bool) -> Result<Lowered, Stop> {
         let p = self.x.p;
+        if counted {
+            // Before anything else, so that wave counts, reads of the first
+            // lane and stores know only the lanes that run.
+            let original = self.s.entry;
+            let width = self.s.threads.expect("compute thread count")[0];
+            let limit = self.host_word(RootType::Other(super::shader::USER_DISPATCH_THREADS_X), 0, width);
+            let Val::I32(group) = self.compute_id("groupId.i32", 94, 0) else {
+                unreachable!()
+            };
+            let Val::I32(thread) = self.thread_id(0) else {
+                unreachable!()
+            };
+            let width = self.s.m.i32(width);
+            let first = self.s.m.bin(original, Bin::Mul, group, width);
+            let x = self.s.m.bin(original, Bin::Add, first, thread);
+            let zero = self.s.m.i32(0);
+            let all = self.s.m.cmp(original, pred::EQ, limit, zero);
+            let inside = self.s.m.cmp(original, pred::IULT, x, limit);
+            let runs = self.s.m.bin(original, Bin::Or, all, inside);
+            // Two host waves that exchange: this one's half of the pair
+            // emptied first, by every lane, whether it stays or leaves.
+            if let Some((slot, false, _)) = self.exchange.as_ref().map(|(a, b, _)| (*a, *b, ()))
+                && !self.local
+            {
+                let pair = self.exchange_pair(slot);
+                let cl = self.console_lane();
+                let five = self.s.m.i32(5);
+                let half = self.s.m.bin(original, Bin::LShr, cl, five);
+                let index = self.s.m.bin(original, Bin::Add, pair, half);
+                let lds = self.s.lds();
+                let ptr = self.s.m.element(original, lds, index);
+                self.s.m.store(original, ptr, zero);
+            }
+            let (body, done) = (self.s.m.new_block(), self.s.m.new_block());
+            self.s.m.terminate(original, Term::CondBr(runs, body, done));
+            self.s.m.terminate(done, Term::Ret);
+            self.s.entry = body;
+        }
         let order = crate::ir::reverse_postorder(&p.blocks);
         for (n, &b) in order.iter().enumerate() {
             self.rpo[b] = n;

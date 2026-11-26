@@ -69,6 +69,13 @@ pub const USER_VIEW_ADDRESS: u32 = 0x101;
 /// view. Asked for every root UAV, and for the root SRVs of programs with
 /// a spilled user-data table.
 pub const USER_VIEW_BIAS: u32 = 0x103;
+/// `RootType::Other` code of a user-data dword the host sets at a dispatch
+/// counted in threads (the console's `DispatchX` with its flag 0x20, "use
+/// thread dimensions"): how many of the threads numbered along X run (0:
+/// all of every group). The metadata's `dword` is the group's width. Asked
+/// for by the structure builder's programs ([`crate::spill::is_spilled`]).
+/// After avatarmanz/VIctory-7900XTX and DexNom/VIctory bc3cd4b0.
+pub const USER_DISPATCH_THREADS_X: u32 = 0x106;
 
 /// `ShaderFlags` bits (metadata) and their `SFI0` feature bits.
 pub(crate) mod flags {
