@@ -1536,7 +1536,19 @@ pub(crate) fn probe_view_limit() {
         } else if fits(UNCAPPED_VIEWS) {
             UNCAPPED_VIEWS
         } else {
-            PORTABLE_VIEWS
+            // The most between the two the host takes (NVIDIA's limit is
+            // not documented past 1,000,000; every view more is a dynamic
+            // slot more, which an RTX 3070 Ti ran out of).
+            let (mut lo, mut hi) = (PORTABLE_VIEWS, UNCAPPED_VIEWS);
+            while hi - lo > 4096 {
+                let mid = lo + (hi - lo) / 2;
+                if fits(mid) {
+                    lo = mid;
+                } else {
+                    hi = mid;
+                }
+            }
+            lo
         };
         tracing::info!(
             views,
