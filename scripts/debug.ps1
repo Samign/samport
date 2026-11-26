@@ -20,7 +20,14 @@ param(
 # default is 4 GB, sized for a 24 GB card; a run used 1.16 GB), and texture copies at most
 # 3.5 GB (the run before had 4.9 GB of host textures and frames of 2-3.5 s on the card while
 # the driver moved memory out). Anything given in -More wins.
-$defaults = @{ VICTORY_MEMORY_CARD_MB = '1536'; VICTORY_TEXTURE_BUDGET_MB = '3584' }
+# The console reports a 1080p television (the base leaves 3840x2160: the title then renders
+# at 4K, which an 8 GB card cannot hold), and textures get card memory only for the levels
+# the title shows (tiled resources; VICTORY_LEVELS_ON_DEMAND, off in the base). The run with
+# only the two caps above still had 9.4 GB in use on a 7.2 GB budget.
+$defaults = @{
+    VICTORY_MEMORY_CARD_MB = '1536'; VICTORY_TEXTURE_BUDGET_MB = '3584'
+    VICTORY_DISPLAY_MODE = '1920x1080'; VICTORY_LEVELS_ON_DEMAND = '1'
+}
 foreach ($k in $defaults.Keys) { if (-not $More.ContainsKey($k)) { $More[$k] = $defaults[$k] } }
 $play = Join-Path (Split-Path -Parent $MyInvocation.MyCommand.Path) 'play.ps1'
 $env:NO_COLOR = '1'
@@ -34,7 +41,7 @@ $summary = $Log -replace '\.log$', '-summary.txt'
 $patterns = @(
     " fps, ", "structure builder", "does not translate", "host pipeline refused", "unhandled exception",
     "first-chance exception", "device removed", "memory allocation", "title memory by address:",
-    "MB private", "card's memory", "budget", "ERROR", "panicked", "without a host pipeline: ", "ambient"
+    "MB private", "card's memory", "budget", "video memory as the system counts", "ERROR", "panicked", "without a host pipeline: ", "ambient"
 ) -join "|"
 Select-String -Path $Log -Pattern $patterns | ForEach-Object { $_.Line.Trim() } | Select-Object -Unique | Set-Content $summary
 Get-Content $Log -Tail 3000 | Set-Content ($Log -replace '\.log$', '-tail.txt')
