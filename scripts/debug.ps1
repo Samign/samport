@@ -14,7 +14,11 @@ param(
     [switch]$Safe,
     [ValidateSet('diag', 'release')][string]$Build = 'diag',
     [hashtable]$More = @{},
-    [string]$Log = "$env:TEMP\ztrx-diag.log"
+    [string]$Log = "$env:TEMP\ztrx-diag.log",
+    # Series S by default here: the title then plans for about 8 GB of graphics memory and a
+    # lower resolution, as an 8 GB card needs (as Series X it had 10.1 GB in use on a 7.2 GB
+    # budget at a reported 1080p). -Console series-x for the base's behaviour.
+    [ValidateSet('series-x', 'series-s')][string]$Console = 'series-s'
 )
 # For an 8 GB card (RTX 3070 Ti): the builder's arenas on the card at most 1.5 GB (the base's
 # default is 4 GB, sized for a 24 GB card; a run used 1.16 GB), and texture copies at most
@@ -31,10 +35,10 @@ $defaults = @{
 foreach ($k in $defaults.Keys) { if (-not $More.ContainsKey($k)) { $More[$k] = $defaults[$k] } }
 $play = Join-Path (Split-Path -Parent $MyInvocation.MyCommand.Path) 'play.ps1'
 $env:NO_COLOR = '1'
-$splat = @{ Exe = $Exe; Build = $Build; More = $More }
+$splat = @{ Exe = $Exe; Build = $Build; More = $More; Console = $Console }
 if (-not $NoRayTracing) { $splat.RayTracing = $true }
 if ($Safe) { $splat.Safe = $true }
-Write-Host "log: $Log  raytracing=$(-not $NoRayTracing) safe=$([bool]$Safe) more=$(($More.GetEnumerator() | ForEach-Object { "$($_.Key)=$($_.Value)" }) -join ',')"
+Write-Host "log: $Log  console=$Console raytracing=$(-not $NoRayTracing) safe=$([bool]$Safe) more=$(($More.GetEnumerator() | ForEach-Object { "$($_.Key)=$($_.Value)" }) -join ',')"
 & $play @splat 2>&1 | ForEach-Object { "$_" } | Tee-Object -FilePath $Log
 
 $summary = $Log -replace '\.log$', '-summary.txt'
