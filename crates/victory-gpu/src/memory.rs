@@ -87,7 +87,7 @@ enum Held {
 /// that had none (the ray-tracing structure builder lost hundreds a frame),
 /// no refresh, no copy back, and the pool's pages seen at every address
 /// that shows them.
-fn pool_in_place() -> bool {
+pub(crate) fn pool_in_place() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var_os("VICTORY_POOL_IN_PLACE").is_some_and(|v| v == "1"))
 }

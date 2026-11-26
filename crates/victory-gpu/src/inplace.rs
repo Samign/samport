@@ -135,13 +135,26 @@ pub(crate) fn place_part(device: &ID3D12Device, start: u64, len: u64) -> Result<
 /// buffers or a title buffer, if [`level`] asks for it and the memory can
 /// be opened; `None` leaves the caller to make a copy, as before.
 pub(crate) fn place_for(start: u64, len: u64, window: bool) -> Option<Placed> {
-    if level() < if window { 1 } else { 2 } {
+    if level() < if window { 1 } else { 2 } && !crate::memory::pool_in_place() {
         return None;
     }
-    // View memory: known from the runtime without asking Windows.
-    if cover(start as usize, len as usize) != Cover::None {
-        STATS[4].fetch_add(1, Ordering::Relaxed);
+    if level() < if window { 1 } else { 2 } && cover(start as usize, len as usize) == Cover::None {
         return None;
+    }
+    // View memory: known from the runtime without asking Windows. One run
+    // of a committed section of the page pool (`VICTORY_POOL_IN_PLACE`) is
+    // placed on the section's heap, so that a root view or a table's view
+    // of pool memory reads and writes the same bytes as a shader that
+    // reaches it by address (`memory::pool_entry`).
+    match cover(start as usize, len as usize) {
+        Cover::None => {}
+        Cover::Run(section, offset) if crate::memory::pool_in_place() => {
+            return place_on_section(section, offset, len, window);
+        }
+        _ => {
+            STATS[4].fetch_add(1, Ordering::Relaxed);
+            return None;
+        }
     }
     if STATS[1].load(Ordering::Relaxed) + STATS[3].load(Ordering::Relaxed) + len > most() {
         STATS[6].fetch_add(1, Ordering::Relaxed);
@@ -162,6 +175,31 @@ pub(crate) fn place_for(start: u64, len: u64, window: bool) -> Option<Placed> {
         Err(Some(e)) => {
             if STATS[5].fetch_add(1, Ordering::Relaxed) < 8 {
                 tracing::warn!(start = format_args!("{start:#x}"), len, error = %e, "title memory not opened in place: a copy instead");
+            }
+            None
+        }
+    }
+}
+
+/// `[offset, offset + len)` of a committed section of the page pool, as a
+/// buffer placed on the section's heap.
+fn place_on_section(section: usize, offset: u64, len: u64, window: bool) -> Option<Placed> {
+    let heap = section_heap(section)?;
+    let host = crate::host::host()?;
+    let at = offset & !(K64 as u64 - 1);
+    let bytes = (offset + len.max(1)).next_multiple_of(K64 as u64) - at;
+    match place(&host.device, &heap, at, bytes) {
+        Ok(buffer) => {
+            // SAFETY: a live buffer.
+            let gpu = unsafe { buffer.GetGPUVirtualAddress() } + (offset - at);
+            let s = if window { 0 } else { 2 };
+            STATS[s].fetch_add(1, Ordering::Relaxed);
+            STATS[s + 1].fetch_add(len, Ordering::Relaxed);
+            Some(Placed { buffer, heap, gpu, bias: offset - at })
+        }
+        Err(e) => {
+            if STATS[5].fetch_add(1, Ordering::Relaxed) < 8 {
+                tracing::warn!(offset, len, error = %e, "page pool memory not placed: a copy instead");
             }
             None
         }
