@@ -50,7 +50,7 @@ $summary = $Log -replace '\.log$', '-summary.txt'
 $patterns = @(
     " fps, ", "structure builder", "does not translate", "host pipeline refused", "unhandled exception",
     "first-chance exception", "device removed", "memory allocation", "title memory by address:",
-    "MB private", "what holds it", "memory map", "in place:", "card's memory", "budget", "video memory as the system counts", "ERROR", "panicked", "without a host pipeline: ", "ambient"
+    "WARN", "stacks of", "    #", "MB private", "what holds it", "memory map", "in place:", "card's memory", "budget", "video memory as the system counts", "ERROR", "panicked", "without a host pipeline: ", "ambient"
 ) -join "|"
 Select-String -Path $Log -Pattern $patterns | ForEach-Object { $_.Line.Trim() } | Select-Object -Unique | Set-Content $summary
 Get-Content $Log -Tail 3000 | Set-Content ($Log -replace '\.log$', '-tail.txt')
