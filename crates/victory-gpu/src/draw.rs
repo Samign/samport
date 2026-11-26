@@ -3229,6 +3229,22 @@ impl State {
                 .max()
                 .unwrap_or(0)
                 + 1;
+            // The first entry a shader reads (its entries and the views it
+            // picks; arrays are read upward from their entry): the slots
+            // below it are not made, and the table is bound that many slots
+            // before its first made one. On a host heap capped at 1,000,000
+            // views the refused tables were the big ones (86 slots on
+            // average, 5 for those made): 2,800 a frame on an RTX 3070 Ti.
+            let lo = if trim_tables() {
+                entries()
+                    .map(|u| u.table_offset_dwords / 8)
+                    .chain(selected.first().copied())
+                    .min()
+                    .unwrap_or(0)
+                    .min(n - 1)
+            } else {
+                0
+            };
             let last = table.checked_add(u64::from(n - 1) * 32);
             if n > crate::descriptor::host::DYNAMIC
                 || last.and_then(|handle| heap.index(handle)).is_none()
@@ -3300,20 +3316,23 @@ impl State {
                 continue;
             }
             FRESH_STATS[0].fetch_add(1, Ordering::Relaxed);
-            FRESH_STATS[2].fetch_add(u64::from(n), Ordering::Relaxed);
-            FRESH_STATS[3].fetch_max(u64::from(n), Ordering::Relaxed);
+            FRESH_STATS[2].fetch_add(u64::from(n - lo), Ordering::Relaxed);
+            FRESH_STATS[3].fetch_max(u64::from(n - lo), Ordering::Relaxed);
             say_fresh(host);
-            let Some(first) = host.dynamic(n) else {
+            let Some(made_first) = host.dynamic(n - lo) else {
                 // No room: the draw must not run with the title's own
                 // offsets (slots never made for it); `bind` drops it.
                 FRESH_STATS[4].fetch_add(1, Ordering::Relaxed);
-                FRESH_STATS[5].fetch_add(u64::from(n), Ordering::Relaxed);
+                FRESH_STATS[5].fetch_add(u64::from(n - lo), Ordering::Relaxed);
                 made.push((slot, u32::MAX));
                 continue;
             };
+            // Where the table begins: `lo` slots before the first made one
+            // (title slots or other tables' there; never read).
+            let first = made_first - lo;
             self.fresh_tables.insert(key, FreshTable { first, epoch: 0, ready: Vec::new() });
             self.dynamic
-                .push((std::ptr::from_ref(heap) as usize, first, n));
+                .push((std::ptr::from_ref(heap) as usize, made_first, n - lo));
             // The title's own slots of this table: what the draw reads of
             // them it brings up to date here, in the dynamic slots.
             let title_first = heap.index(table).filter(|first| first + n <= host.count());
@@ -3333,7 +3352,7 @@ impl State {
             let recording = self.recording;
             // The whole range: a shader may index past the entries its
             // used-resource list names (descriptor arrays).
-            for k in 0..n {
+            for k in lo..n {
                 let index = first + k;
                 // A view this list has made before: its descriptor copied,
                 // and nothing more if nothing changed in the list since.
@@ -4508,4 +4527,11 @@ fn say_fresh(host: &crate::descriptor::host::HostHeap) {
         all,
         host.count()
     );
+}
+
+/// Whether fresh descriptor tables start at the first entry a shader reads
+/// (`VICTORY_TRIM_TABLES=0`: from entry 0, as before).
+fn trim_tables() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("VICTORY_TRIM_TABLES").is_none_or(|v| v != "0"))
 }
