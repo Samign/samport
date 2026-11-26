@@ -38,7 +38,7 @@
 //! memory module of the layer knows and this one does not ask yet.
 //!
 //! shortcut: a copy that is numbered is kept for the rest of the run, and
-//! there are at most [`COPIES`] of them (4 MiB windows mostly: 4 GiB at
+//! there are at most [`copies_limit`] of them (4 MiB windows mostly: 4 GiB at
 //! most). Every dispatch of such a shader brings all numbered copies up to
 //! date and, if it can store, declares all of them written (the bytes are
 //! compared on the CPU afterwards, as for any unordered access view): a
@@ -55,8 +55,17 @@ use crate::host::{HostList, host};
 use crate::shadow::Shadow;
 
 /// Copies that can be numbered (the run of heap slots is one longer). A
-/// listed frame of the opening cutscene names about 50 windows.
-const COPIES: u32 = 1023;
+/// listed frame of the opening cutscene names about 50 windows; with the
+/// ray-tracing structure builder running, 1023 were used up in 20 seconds
+/// (26 November: the title's graphics memory is thousands of separate
+/// 64 KiB allocations, a copy each), so `VICTORY_MEMORY_COPIES` sets it
+/// (default 8191).
+static COPIES_N: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+fn copies_limit() -> u32 {
+    *COPIES_N.get_or_init(|| {
+        std::env::var("VICTORY_MEMORY_COPIES").ok().and_then(|v| v.parse().ok()).unwrap_or(8191).clamp(1023, 65535)
+    })
+}
 /// A window of memory outside buffers (`shadow.rs`).
 const CELL: u64 = 4 << 20;
 /// A directory page.
@@ -154,7 +163,7 @@ impl Memory {
         }
         let n = match self.copies.iter().position(|c| Arc::ptr_eq(c, &shadow)) {
             Some(n) => n,
-            None if self.copies.len() < COPIES as usize => {
+            None if self.copies.len() < copies_limit() as usize => {
                 self.copies.push(shadow.clone());
                 let n = self.copies.len() - 1;
                 // Every page the copy holds whole, not only the one asked
@@ -180,7 +189,7 @@ impl Memory {
             None => {
                 static ONCE: std::sync::Once = std::sync::Once::new();
                 ONCE.call_once(|| {
-                    tracing::warn!(COPIES, "title memory by address: no number left for another copy; its pages read zeros")
+                    tracing::warn!(copies = copies_limit(), "title memory by address: no number left for another copy; its pages read zeros")
                 });
                 return;
             }
@@ -226,8 +235,10 @@ impl Memory {
     }
 
     /// For a stage of the structure builder: the title's allocation around
-    /// `address`, from `address` on (at most `VICTORY_BVH_WHOLE_MB`, 256 MiB
-    /// by default), each 4 MiB of it given its copy. A stage reaches memory
+    /// `address`, from `address` on (at most `VICTORY_BVH_WHOLE_MB`; off by
+    /// default: the title's graphics memory turned out to be thousands of
+    /// 64 KiB allocations, so the allocation around an address is mostly
+    /// that one page), each 4 MiB of it given its copy. A stage reaches memory
     /// through pointers it reads out of memory (stage 0 writes each box
     /// where its record says), and a page with no copy when it runs is a
     /// lost access: the stores dropped, the reads zeros, so the next stages
@@ -242,7 +253,7 @@ impl Memory {
         static CAP: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
         static DONE: Mutex<Option<std::collections::HashSet<(usize, u64)>>> = Mutex::new(None);
         let cap = *CAP.get_or_init(|| {
-            std::env::var("VICTORY_BVH_WHOLE_MB").ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(256) << 20
+            std::env::var("VICTORY_BVH_WHOLE_MB").ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(0) << 20
         });
         if cap == 0 {
             return;
@@ -269,7 +280,7 @@ impl Memory {
         let mut cells = 0u32;
         while (at as u64) < end {
             // (room left for what the stages fault on and the rest of the frame)
-            if self.copies.len() >= COPIES as usize * 3 / 4 {
+            if self.copies.len() >= copies_limit() as usize * 3 / 4 {
                 break;
             }
             let Some(m) = query(at) else { break };
@@ -406,7 +417,7 @@ pub(crate) fn ready(
         Some(&run) => run,
         None => {
             // Held for the heap's life: not given back with a list's slots.
-            let base = heap.dynamic(COPIES + 1)?;
+            let base = heap.dynamic(copies_limit() + 1)?;
             heap.null_raw_uav_at(base);
             (base, 0)
         }
