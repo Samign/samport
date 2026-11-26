@@ -128,6 +128,84 @@ pub(super) fn lower_counted(parts: &Parts, counted: bool) -> Result<Lowered, Sha
     }
 }
 
+/// VGPR values that are the same in every lane that computed them, under any EXEC: made by
+/// vector instructions that read only scalars, constants and such values (no lane masks,
+/// no lane numbers, no reads of other lanes), by reads of LDS at an address made of them, or
+/// joined by phis (loop-carried ones too) of such values. Lanes that did not run the
+/// instruction keep another value, so this holds for a first-lane read only among lanes that
+/// ran it, which is what the compiler's waterfall-style loops do: the lanes still in the loop
+/// are a subset of those that made the value (the scan over the waves' totals that the
+/// ray-tracing structure builder runs, for one).
+/// shortcut: the subset is assumed, not checked.
+fn active_uniform(p: &Program, st: &Structured) -> HashSet<Value> {
+    let is_mask = |v: Value| st.masks.contains_key(&v) || st.highs.contains_key(&v);
+    let mut same: HashSet<Value> = HashSet::new();
+    let order = crate::ir::reverse_postorder(&p.blocks);
+    // Loop-carried phis need another round once their back edges are known.
+    for _ in 0..8 {
+        let before = same.len();
+        for &b in &order {
+            let block = &p.blocks[b];
+            for phi in &block.phis {
+                if matches!(phi.reg, Reg::V(_)) && phi.args.iter().all(|a| same.contains(a) || *a == phi.value) {
+                    same.insert(phi.value);
+                }
+            }
+            for inst in &block.insts {
+                let name = inst.name();
+                let fits = match &inst.fields {
+                    Fields::Valu(v) => {
+                        v.dpp.is_none()
+                            && v.sdwa.is_none()
+                            && !name.starts_with("v_mbcnt")
+                            && !name.starts_with("v_cmp")
+                            && !name.starts_with("v_cndmask")
+                            && !name.contains("lane")
+                            && !name.contains("perm")
+                    }
+                    Fields::Ds { .. } => name.starts_with("ds_read_b32") || name.starts_with("ds_read_b64"),
+                    _ => false,
+                };
+                if !fits {
+                    continue;
+                }
+                // The vector registers the instruction takes as sources; under a guard it also
+                // reads its destination's old value, which only the lanes that do not run keep.
+                let mut sources: Vec<u8> = Vec::new();
+                let mut add = |op: &Operand| {
+                    if let Operand::Vector { reg, .. } = *op {
+                        sources.extend((0..4).map(|k| reg.saturating_add(k)));
+                    }
+                };
+                match &inst.fields {
+                    Fields::Valu(v) => v.src.iter().for_each(&mut add),
+                    Fields::Ds { addr, data, .. } => {
+                        addr.iter().for_each(&mut add);
+                        data.iter().for_each(&mut add);
+                    }
+                    _ => {}
+                }
+                let written = |reg: u8| inst.writes.iter().any(|w| w.0 == Reg::V(reg));
+                let alike = inst.reads.iter().all(|r| match r.0 {
+                    Reg::V(reg) if !sources.contains(&reg) && written(reg) => true,
+                    Reg::V(_) => same.contains(&r.1),
+                    Reg::S(code) if code == EXEC || code == EXEC + 1 => true,
+                    Reg::S(_) => !is_mask(r.1),
+                    Reg::Scc => false,
+                });
+                if alike {
+                    same.extend(inst.writes.iter().filter(|w| matches!(w.0, Reg::V(_))).map(|w| w.1));
+                }
+            }
+        }
+        if same.len() == before {
+            break;
+        }
+    }
+    same
+}
+
+
 const TWO_PI: f32 = std::f32::consts::TAU;
 /// `s_sendmsg` id of a mesh or NGG stage's output allocation request.
 const GS_ALLOC_REQ: u16 = 9;
@@ -349,6 +427,10 @@ struct Lower<'a> {
     /// With `exchange`: VGPR values every lane holds alike ([`lane_uniform`]); a first-lane
     /// read of one needs nothing from the other host wave.
     uniform: HashSet<Value>,
+    /// With `exchange`: VGPR values the same in every lane that computed them, whatever lanes
+    /// ran ([`active_uniform`]); a first-lane read of one where not every lane runs reads the
+    /// same in either host wave.
+    active_uniform: HashSet<Value>,
     /// With `exchange`: the wave ORs that only steer a loop over each lane's own bits, which
     /// a host wave takes over its own lanes wherever they stand ([`super::own_bits`]).
     own_bits: super::own_bits::OwnBits,
@@ -1679,6 +1761,10 @@ impl<'a> Lower<'a> {
             local_any: LOCAL_ANY.get(),
             uniform: match &exchange {
                 Some((_, false, all)) if !LOCAL_WAVES.get() => lane_uniform(p, x.st, all),
+                _ => HashSet::new(),
+            },
+            active_uniform: match &exchange {
+                Some((_, false, _)) if !LOCAL_WAVES.get() => active_uniform(p, x.st),
                 _ => HashSet::new(),
             },
             own_bits: match &exchange {
@@ -8793,7 +8879,17 @@ impl<'a> Lower<'a> {
                     _ => true,
                 };
                 let halves = self.exchange.as_ref().is_some_and(|e| !e.1) && !self.local;
-                let r = if halves && !alike {
+                // the same in every lane that made it: either half's own first lane reads it
+                // (the structure builder's block-wide scans; samport 7e4835b, 3691433)
+                let active_alike = match v.src.first() {
+                    Some(&Operand::Vector { reg, .. }) => {
+                        inst.read(Reg::V(reg)).is_some_and(|x| self.active_uniform.contains(&x))
+                    }
+                    _ => false,
+                };
+                let r = if halves && !alike && active_alike && !self.all_lanes(self.cur_ir) {
+                    mine
+                } else if halves && !alike {
                     if !self.all_lanes(self.cur_ir) {
                         // shortcut: `VICTORY_FIRSTLANE_OWN=1` takes the host wave's own
                         // first lane, exact when the value is the same in every lane of
@@ -12920,6 +13016,106 @@ mod tests {
             prims: vec![],
             mesh_stride: 0,
         })
+    }
+
+
+    /// A wave64 program of 128 threads on a host of 32-lane waves, shaped like the compiler's
+    /// scan over the waves' totals: each wave past the first walks the waves before it in a
+    /// loop whose lanes leave it wave by wave, carrying a sum in a VGPR it reads back with
+    /// `v_readfirstlane`. `add` adds the step's value (from a scalar here; an LDS total in the
+    /// compiler's) to that sum. A lane read across the halves makes the two host waves
+    /// exchange.
+    fn scan_loop(add: [u32; 2]) -> Result<Lowered, crate::ShaderError> {
+        let words: Vec<u32> = vec![
+            0xBE85_0380, // s_mov_b32 s5, 0
+            0x3D << 26 | 0x02 << 18 | 8 << 6 | 2,
+            125 << 25, // s_load_dwordx4 s[8:11], s[4:5], 0 (a UAV's descriptor)
+            // lane 40's thread index for every lane: a read across the two host waves
+            0xD760_0014,
+            0x0001_5100, // v_readlane_b32 s20, v0, 40
+            0x7E12_0214, // v_mov_b32 v9, s20
+            0x2C0E_0086, // v_lshrrev_b32 v7, 6, v0 (the wave)
+            0x7E10_0280, // v_mov_b32 v8, 0
+            0xBE80_047E, // s_mov_b64 s[0:1], exec
+            0x7DAA_0E80, // v_cmpx_ne_u32 exec, 0, v7
+            0xBF88_000F, // s_cbranch_execz -> end
+            0xBE86_047E, // s_mov_b64 s[6:7], exec
+            0xBE92_0380, // s_mov_b32 s18, 0
+            0xBE91_0380, // s_mov_b32 s17, 0
+            0xBF82_0002, // s_branch -> body
+            0x87FE_0610, // loop: s_and_b64 exec, s[16:17], s[6:7]
+            0x7E22_0508, // v_readfirstlane_b32 s17, v8
+            0x8F10_8212, // body: s_lshl_b32 s16, s18, 2
+            0x8112_8112, // s_add_i32 s18, s18, 1
+            0x7E10_0210, // v_mov_b32 v8, s16 (in the compiler's scan: the LDS total there)
+            add[0],
+            add[1],
+            0xBE90_047E, // s_mov_b64 s[16:17], exec
+            0x7DA4_0E12, // v_cmpx_eq_u32 exec, s18, v7
+            0x8A86_7E06, // s_andn2_b64 s[6:7], s[6:7], exec
+            0xBF85_FFF5, // s_cbranch_scc1 -> loop
+            0xBEFE_0400, // end: s_mov_b64 exec, s[0:1]
+            0xBF8C_C07F, // s_waitcnt lgkmcnt(0)
+            0x38 << 26 | 0x1C << 18,
+            0x80 << 24 | 2 << 16 | 8 << 8, // buffer_store_dword v8, off, s[8:11], 0
+            S_ENDPGM,
+        ];
+        let code: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+        let native = NativeProgram {
+            stage: HwStage::Cs,
+            wave64: true,
+            vgprs: 256,
+            layout: vec![root(RootType::Constants, 0, 0), root(RootType::Table, 4, 1)],
+            used: vec![UsedResource {
+                kind: ResourceType::Uav,
+                root: RootType::Table,
+                table_offset_dwords: 0,
+                lower_bound: 0,
+                stride: 0,
+                dwords: 4,
+                user_data: 4,
+                slot: 1,
+            }],
+            io: StageIo::Cs(ComputeIo {
+                rsrc2: 5 << 1,
+                threads: [128, 1, 1],
+            }),
+            code,
+        };
+        let p = ir::build(&native.code, true, 256).unwrap();
+        let st = structure::structure(&p).unwrap();
+        let res = resource::track(&p, &native.layout, native.stage, Some(&st))?;
+        let io = io::raise(&p, &native).unwrap();
+        let was = super::TEST_HOST_WAVE.replace(Some(32));
+        let out = lower(&Parts {
+            native: &native,
+            p: &p,
+            st: &st,
+            io: &io,
+            res: &res,
+            inputs: vec![],
+            outputs: vec![],
+            prims: vec![],
+            mesh_stride: 0,
+        });
+        super::TEST_HOST_WAVE.set(was);
+        out
+    }
+
+    /// The first-lane read of a sum every lane still in the loop made alike translates on two
+    /// host waves; one of a value that differs per lane is still refused there (what
+    /// [`super::active_uniform`] must not take as alike).
+    #[test]
+    fn a_first_lane_read_of_a_value_alike_in_the_lanes_that_made_it_translates() {
+        // v_add3_u32 v8, s17, v8, 0: the step's value plus the sum so far
+        let alike = scan_loop([0xD76D_0008, 0x0202_1011]).map(|_| ()).map_err(|e| e.to_string());
+        assert_eq!(alike, Ok(()));
+        // v_add3_u32 v8, s17, v8, v0: the lane's own index added in too
+        let per_lane = scan_loop([0xD76D_0008, 0x0402_1011]).map(|_| ()).map_err(|e| e.to_string());
+        assert!(
+            per_lane.as_ref().is_err_and(|e| e.contains("first-lane read")),
+            "{per_lane:?}"
+        );
     }
 
     /// Root parameter `slot` in user SGPRs from `user_data` on.
