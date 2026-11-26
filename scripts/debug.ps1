@@ -16,6 +16,12 @@ param(
     [hashtable]$More = @{},
     [string]$Log = "$env:TEMP\ztrx-diag.log"
 )
+# For an 8 GB card (RTX 3070 Ti): the builder's arenas on the card at most 1.5 GB (the base's
+# default is 4 GB, sized for a 24 GB card; a run used 1.16 GB), and texture copies at most
+# 3.5 GB (the run before had 4.9 GB of host textures and frames of 2-3.5 s on the card while
+# the driver moved memory out). Anything given in -More wins.
+$defaults = @{ VICTORY_MEMORY_CARD_MB = '1536'; VICTORY_TEXTURE_BUDGET_MB = '3584' }
+foreach ($k in $defaults.Keys) { if (-not $More.ContainsKey($k)) { $More[$k] = $defaults[$k] } }
 $play = Join-Path (Split-Path -Parent $MyInvocation.MyCommand.Path) 'play.ps1'
 $env:NO_COLOR = '1'
 $splat = @{ Exe = $Exe; Build = $Build; More = $More }
@@ -28,7 +34,7 @@ $summary = $Log -replace '\.log$', '-summary.txt'
 $patterns = @(
     " fps, ", "structure builder", "does not translate", "host pipeline refused", "unhandled exception",
     "first-chance exception", "device removed", "memory allocation", "title memory by address:",
-    "MB private", "ERROR", "panicked", "without a host pipeline: ", "ambient"
+    "MB private", "card's memory", "budget", "ERROR", "panicked", "without a host pipeline: ", "ambient"
 ) -join "|"
 Select-String -Path $Log -Pattern $patterns | ForEach-Object { $_.Line.Trim() } | Select-Object -Unique | Set-Content $summary
 Get-Content $Log -Tail 3000 | Set-Content ($Log -replace '\.log$', '-tail.txt')
