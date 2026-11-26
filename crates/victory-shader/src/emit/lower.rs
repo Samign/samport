@@ -103,8 +103,20 @@ fn counted_in_threads(parts: &Parts) -> bool {
     cs.threads[0] > 1
         && cs.threads[1..] == [1, 1]
         && crate::spill::is_spilled(parts.native)
-        && (!parts.native.wave64 || host_max_wave() >= 64)
+        && (!parts.native.wave64 || host_max_wave() >= 64 || counted_halves())
         && !parts.p.blocks.iter().flat_map(|b| &b.insts).any(|i| i.name() == "s_barrier")
+}
+
+/// `VICTORY_COUNTED_HALVES=1` (NVIDIA and other hosts of 32-lane waves; off
+/// by default): a wave64 builder program run as two host waves counts its
+/// threads too. Each host wave first empties its half of the exchange pair,
+/// so that a half whose lanes all left gives nothing (0) to the other's
+/// exchanges; the exchanges' group barriers then rely on the host passing
+/// threads that returned (as NVIDIA's do). From samport 4c8dbca. Part of
+/// the translation: the shader cache keys on it.
+pub(crate) fn counted_halves() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("VICTORY_COUNTED_HALVES").is_some_and(|v| v == "1"))
 }
 
 /// [`lower`]; `counted`: the lanes past a dispatch's count of threads leave
@@ -2415,6 +2427,20 @@ impl<'a> Lower<'a> {
             let all = self.s.m.cmp(original, pred::EQ, limit, zero);
             let inside = self.s.m.cmp(original, pred::IULT, x, limit);
             let runs = self.s.m.bin(original, Bin::Or, all, inside);
+            // Two host waves that exchange (`counted_halves`): this one's half
+            // of the pair emptied first, by every lane, whether it stays or leaves.
+            if let Some((slot, false, _)) = self.exchange.as_ref().map(|(a, b, _)| (*a, *b, ()))
+                && !self.local
+            {
+                let pair = self.exchange_pair(slot);
+                let cl = self.console_lane();
+                let five = self.s.m.i32(5);
+                let half = self.s.m.bin(original, Bin::LShr, cl, five);
+                let index = self.s.m.bin(original, Bin::Add, pair, half);
+                let lds = self.s.lds();
+                let ptr = self.s.m.element(original, lds, index);
+                self.s.m.store(original, ptr, zero);
+            }
             let (body, done) = (self.s.m.new_block(), self.s.m.new_block());
             self.s.m.terminate(original, Term::CondBr(runs, body, done));
             self.s.m.terminate(done, Term::Ret);

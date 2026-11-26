@@ -1,3 +1,29 @@
+# samport
+
+**samport** is [Samign](https://github.com/Samign)'s fork for an **NVIDIA RTX 3070 Ti
+(8 GB) with 32 GB of RAM**: the title with its own ray-traced lighting on, at a
+playable rate, on a 32-lane-wave GPU. Since 2026-11-26 it builds on
+[avatarmanz/VIctory-7900XTX](https://github.com/avatarmanz/VIctory-7900XTX) (whose
+description follows), which got the title's ray tracing working on AMD.
+
+On top of that base, for NVIDIA:
+
+| change | why |
+|---|---|
+| exact first-lane reads of values alike in the lanes that made them (`active_uniform`) | three of the structure builder's programs did not translate on 32-lane waves, so the builder stayed off (`VICTORY_FIRSTLANE_OWN=1` is no longer needed) |
+| `VICTORY_COUNTED_HALVES=1` (opt-in) | wave64 builder programs run as two host waves also let the lanes past a dispatch's thread count leave, each half first emptying its exchange dword |
+| `scripts\debug.ps1` | `play.ps1` with ray tracing on, the log, a summary and the last 3,000 lines in `%TEMP%` |
+
+First run on the 3070 Ti (2026-11-26): ray tracing on, lit interiors and readable
+text, about 7 fps in the world (125-145 ms a frame, 55-65 ms of it on the card),
+31.7 GB of private memory (a page file of 32-64 GB was needed). Next: memory for
+32 GB, then speed.
+
+The earlier samport work on another base (Zettrox/ztrx) is on the branch
+`texture-room-diagnostics`.
+
+---
+
 # VIctory on an RX 7900 XTX
 
 A fork of [VIctory](https://github.com/Marvisak/VIctory), a compatibility layer
