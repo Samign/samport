@@ -879,7 +879,8 @@ impl State {
                 _ => {}
             }
         }
-        crate::memory::ready(list, heap, &addresses, &constants, writes)
+        let whole = crate::pipeline::is_builder(self.pipeline as This);
+        crate::memory::ready(list, heap, &addresses, &constants, writes, whole)
     }
 
     /// The bound heap holding `handle`.

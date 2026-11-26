@@ -58,6 +58,8 @@ param(
     [switch]$BvhNullViews,
     [switch]$BvhDry,
     [int]$BvhRun = -1,
+    [int]$BvhWarmup = 0,
+    [int]$BvhWholeMB = -1,
     [int]$BvhWriteBack = -1,
     [switch]$NamedWrites,
     [int]$InPlace = 1,                                # 1 (default): zero-copy for memory outside buffers; 0 off
@@ -73,7 +75,7 @@ $explicitFast = $PSBoundParameters.ContainsKey('Fast')
 if ($InPlace -ge 2 -and $explicitFast) { Write-Host "-InPlace 2 cannot be combined with -Fast / VICTORY_LATE_WAIT" -ForegroundColor Red; exit 1 }
 $Fast = -not $NoFast -and $InPlace -lt 2 -and -not $GpuTiming
 foreach ($v in "VICTORY_KEYS", "VICTORY_CAPTURE", "VICTORY_CAPTURE_FRAMES", "VICTORY_DUMP_TARGETS",
-               "VICTORY_BVH_BUILDER", "VICTORY_BVH_QUARANTINE", "VICTORY_BVH_APPROX", "VICTORY_BVH_NULL_VIEWS", "VICTORY_BVH_DRY", "VICTORY_BVH_RUN", "VICTORY_BVH_WRITEBACK", "VICTORY_RELAY", "VICTORY_LATE_WAIT",
+               "VICTORY_BVH_BUILDER", "VICTORY_BVH_QUARANTINE", "VICTORY_BVH_APPROX", "VICTORY_BVH_NULL_VIEWS", "VICTORY_BVH_DRY", "VICTORY_BVH_RUN", "VICTORY_BVH_WARMUP", "VICTORY_BVH_WHOLE_MB", "VICTORY_BVH_WRITEBACK", "VICTORY_RELAY", "VICTORY_LATE_WAIT",
                "VICTORY_WIDE_BACK", "VICTORY_TEXTURE_PCT", "VICTORY_TEXTURE_BUDGET_MB",
                "VICTORY_WAVE_WHY", "VICTORY_WAVE_WIDE", "VICTORY_FIRSTLANE_LOCAL", "VICTORY_MEMORY_WRITES",
                "VICTORY_INPLACE", "VICTORY_INPLACE_MB", "VICTORY_INPLACE_PROBE",
@@ -93,6 +95,10 @@ if ($BvhNullViews) { $env:VICTORY_BVH_NULL_VIEWS = "1" }
 if ($BvhDry) { $env:VICTORY_BVH_DRY = "1" }
 # -BvhRun N: only the first N builder stages run; the rest are bound but not run (finds the stage that breaks the title)
 if ($BvhRun -ge 0) { $env:VICTORY_BVH_RUN = "$BvhRun" }
+# -BvhWarmup N: builder stages are bound but not run for N frames after the builder starts (their memory gets its copies first)
+if ($BvhWarmup -gt 0) { $env:VICTORY_BVH_WARMUP = "$BvhWarmup" }
+# -BvhWholeMB N: how much of a builder stage's allocation is made ready around each address it names (default 256, 0 = off)
+if ($BvhWholeMB -ge 0) { $env:VICTORY_BVH_WHOLE_MB = "$BvhWholeMB" }
 # -BvhWriteBack N (with -Builder -NoQuarantine): only the first N builder stages copy their stores back.
 # Quarantine (and -BvhWriteBack) only holds back copies: with -InPlace 1 the card writes title memory directly, so use -InPlace 0.
 if ($BvhWriteBack -ge 0) { $env:VICTORY_BVH_WRITEBACK = "$BvhWriteBack" }
@@ -165,7 +171,7 @@ $patterns = @(
     "builder", "host pipeline refused", "host mesh pipeline", "WAVE64-RETRY",
     "converter shader", "dropped .* without a host pipeline: ", "library saved",
     "ms/frame", "textures picked by index", "device removed", "ERROR",
-    "first-chance exception", "only approximately", "turned off for the rest", "buffer view that is not there", "structure builder stage", "unhandled exception", "translated in another form", "had no copy", "no number left",
+    "first-chance exception", "only approximately", "turned off for the rest", "buffer view that is not there", "structure builder stage", "unhandled exception", "translated in another form", "had no copy", "no number left", "made ready whole",
     "program without a host pipeline", "MESH-COUNTS", "indirect mesh draws per frame", "merged indirect mesh draws", "record assembler", "merged mesh command signature", "indirect mesh draws reading the next record", "in place", "copystat: memory: ", "display mode reported", "depth texture with", "swap chain",  "time by command", "the card's clock", "dstorage", "black frame", "enables the", "buffer view", "constant buffer not", "does not translate"
 ) -join "|"
 Select-String -Path $Log -Pattern $patterns |

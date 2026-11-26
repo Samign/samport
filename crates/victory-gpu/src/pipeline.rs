@@ -295,6 +295,18 @@ pub(crate) fn builder_quarantined(this: This) -> bool {
 #[cfg(windows)]
 pub(crate) fn builder_held(this: This) -> bool {
     static RUN: OnceLock<Option<usize>> = OnceLock::new();
+    static WARMUP: OnceLock<u64> = OnceLock::new();
+    // `VICTORY_BVH_WARMUP=<frames>`: for that many frames after the builder
+    // first runs, its stages are bound and not run, so that what they name
+    // (whole allocations, `memory::name_whole`) has its copies before any
+    // stage stores through a pointer it reads out of memory.
+    let warmup = *WARMUP.get_or_init(|| std::env::var("VICTORY_BVH_WARMUP").ok().and_then(|v| v.parse().ok()).unwrap_or(0));
+    if warmup > 0 && is_builder(this) {
+        let from = BUILDER_FROM.load(std::sync::atomic::Ordering::Relaxed);
+        if crate::frame::current() < from.saturating_add(warmup) {
+            return true;
+        }
+    }
     let Some(n) = *RUN.get_or_init(|| {
         if std::env::var_os("VICTORY_BVH_DRY").is_some_and(|v| v == "1") {
             return Some(0);
@@ -408,8 +420,13 @@ pub(crate) fn builder_runs() -> bool {
         "the ray-tracing structure builder runs: all of its programs have host pipelines"
     );
     b.whole = true;
+    BUILDER_FROM.store(crate::frame::current(), std::sync::atomic::Ordering::Relaxed);
     true
 }
+
+/// The frame the builder first ran in (`VICTORY_BVH_WARMUP`).
+#[cfg(windows)]
+static BUILDER_FROM: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(u64::MAX);
 
 /// Whether a console program can store to buffer memory: it has a buffer,
 /// typed-buffer, scalar-memory, flat or global store or atomic, or code

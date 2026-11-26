@@ -225,6 +225,82 @@ impl Memory {
         }
     }
 
+    /// For a stage of the structure builder: the title's allocation around
+    /// `address`, from `address` on (at most `VICTORY_BVH_WHOLE_MB`, 256 MiB
+    /// by default), each 4 MiB of it given its copy. A stage reaches memory
+    /// through pointers it reads out of memory (stage 0 writes each box
+    /// where its record says), and a page with no copy when it runs is a
+    /// lost access: the stores dropped, the reads zeros, so the next stages
+    /// follow zero pointers and stage 19 writes its parent links over the
+    /// title's objects (runs of 26 November: 388 pages lost in the first
+    /// builder frame, the copies used up three minutes later). The pointers
+    /// lie in the allocations the stages are given.
+    /// shortcut: once per allocation and 256 MiB step; `VirtualQuery` walks
+    /// the page tables, slow on the title's 1 GB blocks.
+    fn name_whole(&mut self, address: u64, named: &mut Vec<usize>) {
+        use windows_sys::Win32::System::Memory::{MEM_COMMIT, MEMORY_BASIC_INFORMATION, VirtualQuery};
+        static CAP: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+        static DONE: Mutex<Option<std::collections::HashSet<(usize, u64)>>> = Mutex::new(None);
+        let cap = *CAP.get_or_init(|| {
+            std::env::var("VICTORY_BVH_WHOLE_MB").ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(256) << 20
+        });
+        if cap == 0 {
+            return;
+        }
+        let query = |at: usize| {
+            // SAFETY: plain data filled in by the query.
+            let mut m: MEMORY_BASIC_INFORMATION = unsafe { std::mem::zeroed() };
+            // SAFETY: a valid out pointer of the right size.
+            (unsafe { VirtualQuery(at as *const _, &mut m, size_of_val(&m)) } != 0).then_some(m)
+        };
+        let Some(first) = query(address as usize) else { return };
+        if first.State != MEM_COMMIT {
+            return;
+        }
+        let allocation = first.AllocationBase as usize;
+        {
+            let mut done = DONE.lock().unwrap_or_else(|e| e.into_inner());
+            if !done.get_or_insert_with(Default::default).insert((allocation, address / cap)) {
+                return;
+            }
+        }
+        let end = address + cap;
+        let mut at = first.BaseAddress as usize;
+        let mut cells = 0u32;
+        while (at as u64) < end {
+            // (room left for what the stages fault on and the rest of the frame)
+            if self.copies.len() >= COPIES as usize * 3 / 4 {
+                break;
+            }
+            let Some(m) = query(at) else { break };
+            if m.AllocationBase as usize != allocation {
+                break;
+            }
+            let (from, to) = (m.BaseAddress as u64, m.BaseAddress as u64 + m.RegionSize as u64);
+            if m.State == MEM_COMMIT {
+                let mut cell = from.max(address) & !(CELL - 1);
+                while cell < to.min(end) {
+                    self.map(cell.max(from));
+                    if let Some(n) = self.copy_of(cell.max(from))
+                        && !named.contains(&n)
+                    {
+                        named.push(n);
+                    }
+                    cells += 1;
+                    cell += CELL;
+                }
+            }
+            at = to as usize;
+        }
+        tracing::info!(
+            address = format_args!("{address:#x}"),
+            allocation = format_args!("{allocation:#x}"),
+            cells,
+            copies = self.copies.len(),
+            "title memory by address: a builder stage's allocation made ready whole"
+        );
+    }
+
     /// What a dispatch names: the copy around `address` and the 4 MiB
     /// after it. Their copy numbers (0-based) go into `named`.
     fn name(&mut self, address: u64, named: &mut Vec<usize>) {
@@ -284,6 +360,7 @@ pub(crate) fn ready(
     addresses: &[u64],
     constants: &[u32],
     writes: bool,
+    whole: bool,
 ) -> Option<Ready> {
     let mut guard = MEMORY.lock().unwrap_or_else(|e| e.into_inner());
     if guard.is_none() {
@@ -298,8 +375,10 @@ pub(crate) fn ready(
     }
     let numbered = m.copies.len();
     let mut named = Vec::new();
+    let mut seen = Vec::new();
     for &address in addresses {
         m.name(address, &mut named);
+        seen.push(address);
     }
     // A title address in two constants (low dword, then bits 32 to 39), or
     // in one in 256-byte units. A constant that only looks like one names
@@ -310,9 +389,16 @@ pub(crate) fn ready(
             && c >= 0x1_0000
         {
             m.name(u64::from(c) | u64::from(high) << 32, &mut named);
+            seen.push(u64::from(c) | u64::from(high) << 32);
         }
         if c >= 0x0100_0000 {
             m.name(u64::from(c) << 8, &mut named);
+            seen.push(u64::from(c) << 8);
+        }
+    }
+    if whole {
+        for address in seen {
+            m.name_whole(address, &mut named);
         }
     }
     let key = std::ptr::from_ref(heap) as usize;
