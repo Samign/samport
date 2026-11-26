@@ -450,3 +450,104 @@ fn scc_of_a_mask_operation_joined_with_a_scalar_test_needs_the_skip_wave_wide() 
     }
     eprintln!("ran on the hardware device: the inner test's SCC for every lane once some lane is inside");
 }
+
+/// The cross-half sums of the ray-tracing structure builder's stage that links children to
+/// parents (`28918b7150a7aad5` at 0x078-0x1e4, the run that names it: VICTORY_BVH_RUN=20
+/// crashes and 19 does not): the wave's lane count (`s_bcnt1_i32_b64 exec`), the wave
+/// total of each lane's child count (DPP8, row_mirror, permlanex16, `v_readlane` 32 and 0)
+/// and two exclusive prefix sums carried from the lower half to the upper one by
+/// `v_readlane` 31 under a constant EXEC. Their words as the title has them; each lane's
+/// child count is `t & 3` and its other count `(t >> 2) & 3` here, and each lane stores
+/// (64 + its prefix, its other prefix, the total, the lane count). Lowered here; run on
+/// the host GPU when it takes waves of 32.
+#[test]
+fn the_builders_child_sums_cross_the_halves_as_on_the_console() {
+    let mut words = vec![
+        0x3614_0083, // v_and_b32 v10, 3, v0
+        0x2C12_0082, // v_lshrrev_b32 v9, 2, v0
+        0x3612_1283, // v_and_b32 v9, 3, v9
+        0xBE9A_107E, // s_bcnt1_i32_b64 s26, exec
+        // the wave total of v10 into s27
+        0xBE8C_25C1, 0xD501_0001, 0x0032_1480, 0x4A02_02E9, 0xDE54_C101, 0x4A02_02E9, 0x9360_1201,
+        0x4A02_02E9, 0x0009_2401, 0x4A02_02FA, 0xFF09_4001, 0xD778_0002, 0x0201_0101, 0x4A02_0302,
+        0xD760_000E, 0x0001_4101, 0x4A02_020E, 0xD760_001B, 0x0001_0101, 0xBEFE_040C,
+    ];
+    // the exclusive prefix of the value in v1 (selected from `src` by the saved EXEC) into v2
+    let prefix = |src: u32| {
+        vec![
+            0xBE8C_25C1, 0xD501_0001, 0x0032_0080 | src << 9, 0x7E04_0301, 0x4A04_04FA, 0xFF09_1102,
+            0x4A04_04FA, 0xFF01_1202, 0x4A04_04FA, 0xFF01_1402, 0x4A04_04FA, 0xFF01_1802, 0xBEFE_03FF,
+            0xFFFF_0000, 0xBEFF_03FF, 0xFFFF_0000, 0xD778_4803, 0x0305_8302, 0x4A04_0503, 0xD760_000E,
+            0x0001_3F02, 0xBEFE_0380, 0xBEFF_03C1, 0x4A04_040E, 0xBEFE_03C1, 0xBEFF_03C1, 0x4C04_0302,
+            0xBEFE_040C,
+        ]
+    };
+    words.extend(prefix(10)); // (0xd5010001 00321480: v10)
+    words.extend([
+        0x7E08_0302, // v_mov_b32 v4, v2
+        0x4A08_081A, // v_add_nc_u32 v4, s26, v4
+    ]);
+    words.extend(prefix(9)); // (00321280: v9)
+    words.extend([
+        0x7E16_0302, // v_mov_b32 v11, v2
+        0x341A_0084, // v_lshlrev_b32 v13, 4, v0
+        0x7E1C_021B, // v_mov_b32 v14, s27
+        0x7E1E_021A, // v_mov_b32 v15, s26
+        0xE070_1000, 0x8002_040D, // buffer_store_dword v4, v13, s[8:11], 0 offen
+        0xE070_1004, 0x8002_0B0D, // ... v11 offset:4
+        0xE070_1008, 0x8002_0E0D, // ... v14 offset:8
+        0xE070_100C, 0x8002_0F0D, // ... v15 offset:12
+    ]);
+    assert_eq!(prefix(10)[2], 0x0032_1480);
+    assert_eq!(prefix(9)[2], 0x0032_1280);
+    let native = native(&words);
+    let p = ir::build(&native.code, native.wave64, native.vgprs).expect("ir::build");
+    let shader = lowered(&native, &p, &HashSet::new()).expect("lower");
+    if let Ok(mut v) = validator::Validator::load(validator::Validator::default_path().as_deref()) {
+        let mut copy = shader.dxil.clone();
+        v.validate(&mut copy).expect("DXIL validation failed");
+    }
+    // what the console computes
+    let counts: Vec<u32> = (0..64).map(|t| t & 3).collect();
+    let others: Vec<u32> = (0..64).map(|t| (t >> 2) & 3).collect();
+    let total: u32 = counts.iter().sum();
+    let want: Vec<[u32; 4]> = (0..64)
+        .map(|t| {
+            let below = counts[..t].iter().sum::<u32>();
+            let other = others[..t].iter().sum::<u32>();
+            [64 + below, other, total, 64]
+        })
+        .collect();
+    let _one = super::valu_tests::ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+    let Ok(host) = Host::new(false) else {
+        eprintln!("no SM 6.6 hardware device; not run");
+        return;
+    };
+    let (root, pso) = match host.compute_pipeline(&shader) {
+        Ok(x) => x,
+        Err(e) => {
+            eprintln!("the hardware device does not take this program (waves of 32?): {e}; not run");
+            return;
+        }
+    };
+    let ud = vec![0u32; shader.user_data_dwords().max(1) as usize];
+    let out = host
+        .dispatch(
+            &root,
+            &pso,
+            &Dispatch {
+                roots: vec![(0, Root::Constants(ud))],
+                views: &[View::RawUav(256)],
+                samplers: &[],
+                groups: [1, 1, 1],
+            },
+        )
+        .unwrap_or_else(|e| panic!("dispatch failed: {e}"));
+    let got: Vec<[u32; 4]> = out[0].chunks(4).map(|c| [c[0], c[1], c[2], c[3]]).collect();
+    let wrong: Vec<String> = (0..64)
+        .filter(|&t| got[t] != want[t])
+        .map(|t| format!("lane {t}: got {:?}, the console {:?}", got[t], want[t]))
+        .collect();
+    assert!(wrong.is_empty(), "{} lanes differ:\n{}", wrong.len(), wrong.join("\n"));
+    eprintln!("ran on the hardware device: the builder's child sums match the console in all 64 lanes");
+}
