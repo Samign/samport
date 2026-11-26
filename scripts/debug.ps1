@@ -15,21 +15,21 @@ param(
     [ValidateSet('diag', 'release')][string]$Build = 'diag',
     [hashtable]$More = @{},
     [string]$Log = "$env:TEMP\ztrx-diag.log",
-    # Series S by default here: the title then plans for about 8 GB of graphics memory and a
-    # lower resolution, as an 8 GB card needs (as Series X it had 10.1 GB in use on a 7.2 GB
-    # budget at a reported 1080p). -Console series-x for the base's behaviour.
-    [ValidateSet('series-x', 'series-s')][string]$Console = 'series-s'
+    # series-s: the title would plan for about 8 GB of graphics memory and a lower
+    # resolution, as an 8 GB card needs; on 2026-11-26 it stayed on a dark screen (11 draws a
+    # frame) on this base, so Series X stays the default for now.
+    [ValidateSet('series-x', 'series-s')][string]$Console = 'series-x'
 )
 # For an 8 GB card (RTX 3070 Ti): the builder's arenas on the card at most 1.5 GB (the base's
 # default is 4 GB, sized for a 24 GB card; a run used 1.16 GB), and texture copies at most
-# 3.5 GB (the run before had 4.9 GB of host textures and frames of 2-3.5 s on the card while
+# 2.5 GB (3.5 GB: the card still had 10.1 GB in use on a 7.2 GB budget; the run before had 4.9 GB of host textures and frames of 2-3.5 s on the card while
 # the driver moved memory out). Anything given in -More wins.
 # The console reports a 1080p television (the base leaves 3840x2160: the title then renders
 # at 4K, which an 8 GB card cannot hold), and textures get card memory only for the levels
 # the title shows (tiled resources; VICTORY_LEVELS_ON_DEMAND, off in the base). The run with
 # only the two caps above still had 9.4 GB in use on a 7.2 GB budget.
 $defaults = @{
-    VICTORY_MEMORY_CARD_MB = '1536'; VICTORY_TEXTURE_BUDGET_MB = '3584'
+    VICTORY_MEMORY_CARD_MB = '1536'; VICTORY_TEXTURE_BUDGET_MB = '2560'
     VICTORY_DISPLAY_MODE = '1920x1080'; VICTORY_LEVELS_ON_DEMAND = '1'
 }
 foreach ($k in $defaults.Keys) { if (-not $More.ContainsKey($k)) { $More[$k] = $defaults[$k] } }
