@@ -68,6 +68,55 @@ fn copies_limit() -> u32 {
 }
 /// A window of memory outside buffers (`shadow.rs`).
 const CELL: u64 = 4 << 20;
+/// A buffer placed over the page pool covers this much of it (a shader's
+/// byte in a raw view is 32 bits).
+const CHUNK: u64 = 1 << 30;
+
+/// What a copy number stands for.
+enum Held {
+    /// A host copy of title memory, refreshed and compared as any.
+    Shadow(Arc<Shadow>),
+    /// A buffer placed over 1 GiB of the title's page pool, opened in place.
+    Pool { buffer: ID3D12Resource, len: u64 },
+}
+
+/// `VICTORY_POOL_IN_PLACE=1` (with the runtime making the page pool's
+/// sections committed, `xmem`): shaders that reach title memory by address
+/// reach the pages of the page pool in the pool itself, every view's pages
+/// entered as soon as it is mapped. No copy, so no access is lost to a page
+/// that had none (the ray-tracing structure builder lost hundreds a frame),
+/// no refresh, no copy back, and the pool's pages seen at every address
+/// that shows them.
+fn pool_in_place() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("VICTORY_POOL_IN_PLACE").is_some_and(|v| v == "1"))
+}
+
+/// The runtime mapped a view of the page pool at `[at, at + len)`.
+pub(crate) fn pool_view(at: usize, len: usize) {
+    if !pool_in_place() {
+        return;
+    }
+    let mut guard = MEMORY.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(m) = guard.as_mut() else { return };
+    m.forget(at as u64, len as u64);
+    let mut page = (at as u64).next_multiple_of(PAGE);
+    while page + PAGE <= (at + len) as u64 {
+        m.pool_entry(page);
+        page += PAGE;
+    }
+}
+
+/// What `[at, at + len)` showed is gone: their entries emptied.
+pub(crate) fn pool_gone(at: usize, len: usize) {
+    if !pool_in_place() {
+        return;
+    }
+    let mut guard = MEMORY.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(m) = guard.as_mut() {
+        m.forget(at as u64, len as u64);
+    }
+}
 /// A directory page.
 const PAGE: u64 = 1 << 16;
 
@@ -76,7 +125,9 @@ struct Memory {
     directory: (ID3D12Resource, *mut u32, u64),
     faults: (ID3D12Resource, *mut u32, u64),
     /// Copy `n` is `copies[n - 1]`.
-    copies: Vec<Arc<Shadow>>,
+    copies: Vec<Held>,
+    /// Pool chunks by section and chunk number: their copy number.
+    chunks: HashMap<(usize, u64), usize>,
     /// Per host view heap (by address): the first slot of its run, and how
     /// many copies have their view there.
     heaps: HashMap<usize, (u32, u32)>,
@@ -117,6 +168,7 @@ impl Memory {
             directory: make(u64::from(MEMORY_PAGES) * 2, "directory")?,
             faults: make(u64::from(MEMORY_FAULTS), "faults")?,
             copies: Vec::new(),
+            chunks: HashMap::new(),
             heaps: HashMap::new(),
             frame: u64::MAX,
             refused: Default::default(),
@@ -138,6 +190,9 @@ impl Memory {
             return;
         }
         let start = page * PAGE;
+        if self.pool_entry(start) {
+            return;
+        }
         // A shader's pointer, or a constant taken for an address, may be
         // anything: only memory the title has.
         if self.refused.contains(&page) {
@@ -161,10 +216,10 @@ impl Memory {
         if flags.0 & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS.0 == 0 {
             return;
         }
-        let n = match self.copies.iter().position(|c| Arc::ptr_eq(c, &shadow)) {
+        let n = match self.copies.iter().position(|c| matches!(c, Held::Shadow(s) if Arc::ptr_eq(s, &shadow))) {
             Some(n) => n,
             None if self.copies.len() < copies_limit() as usize => {
-                self.copies.push(shadow.clone());
+                self.copies.push(Held::Shadow(shadow.clone()));
                 let n = self.copies.len() - 1;
                 // Every page the copy holds whole, not only the one asked
                 // for: a structure is more than 64 KiB.
@@ -200,6 +255,64 @@ impl Memory {
         unsafe {
             entry.add(1).write_volatile(offset as u32);
             entry.write_volatile(n as u32 + 1);
+        }
+    }
+
+    /// The page at `start` (a multiple of [`PAGE`]) as a view of the title's
+    /// page pool, opened in place: its entry names the pool chunk and the
+    /// byte in it. False if pool memory is not in place or the page is not
+    /// such a view.
+    fn pool_entry(&mut self, start: u64) -> bool {
+        if !pool_in_place() {
+            return false;
+        }
+        let Some((section, offset, bytes)) = crate::inplace::committed_view_of(start as usize) else {
+            return false;
+        };
+        let chunk = offset / CHUNK;
+        let n = match self.chunks.get(&(section, chunk)) {
+            Some(&n) => n,
+            None => {
+                if self.copies.len() >= copies_limit() as usize {
+                    return false;
+                }
+                let Some(heap) = crate::inplace::section_heap(section) else { return false };
+                let Some(host) = crate::host::host() else { return false };
+                let len = CHUNK.min(bytes - chunk * CHUNK);
+                let buffer = match crate::inplace::place(&host.device, &heap, chunk * CHUNK, len) {
+                    Ok(b) => b,
+                    Err(e) => {
+                        static ONCE: std::sync::Once = std::sync::Once::new();
+                        ONCE.call_once(|| tracing::warn!(error = %e, "a buffer over the title's page pool was refused: copies as before"));
+                        return false;
+                    }
+                };
+                crate::host::name(&buffer, || format!("title memory by address: page pool chunk {chunk}"));
+                self.copies.push(Held::Pool { buffer, len });
+                let n = self.copies.len() - 1;
+                self.chunks.insert((section, chunk), n);
+                n
+            }
+        };
+        let page = start / PAGE;
+        if page >= u64::from(MEMORY_PAGES) - 1 {
+            return false;
+        }
+        // SAFETY: inside the directory's mapping; the offset first.
+        unsafe {
+            let entry = self.directory.1.add(page as usize * 2);
+            entry.add(1).write_volatile((offset - chunk * CHUNK) as u32);
+            entry.write_volatile(n as u32 + 1);
+        }
+        true
+    }
+
+    /// Pages that show something else now: their entries emptied.
+    fn forget(&mut self, at: u64, len: u64) {
+        let (first, end) = (at / PAGE, (at + len).div_ceil(PAGE).min(u64::from(MEMORY_PAGES) - 1));
+        for page in first..end {
+            // SAFETY: inside the directory's mapping.
+            unsafe { self.directory.1.add(page as usize * 2).write_volatile(0) };
         }
     }
 
@@ -376,6 +489,20 @@ pub(crate) fn ready(
     let mut guard = MEMORY.lock().unwrap_or_else(|e| e.into_inner());
     if guard.is_none() {
         *guard = Memory::new();
+        // The pool's views mapped before the first shader that reaches memory by address.
+        if pool_in_place()
+            && let Some(m) = guard.as_mut()
+        {
+            let mut pages = 0u64;
+            for (at, len) in crate::inplace::committed_views() {
+                let mut page = (at as u64).next_multiple_of(PAGE);
+                while page + PAGE <= (at + len) as u64 {
+                    pages += u64::from(m.pool_entry(page));
+                    page += PAGE;
+                }
+            }
+            tracing::info!(pages, chunks = m.chunks.len(), "title memory by address: the page pool's views entered in place");
+        }
     }
     let m = guard.as_mut()?;
     let frame = crate::frame::current();
@@ -422,9 +549,14 @@ pub(crate) fn ready(
             (base, 0)
         }
     };
-    for (n, shadow) in m.copies.iter().enumerate().skip(made as usize) {
-        let (_, len) = shadow.span();
-        heap.raw_uav_at(base + 1 + n as u32, &shadow.buffer, 0, len);
+    for (n, copy) in m.copies.iter().enumerate().skip(made as usize) {
+        match copy {
+            Held::Shadow(shadow) => {
+                let (_, len) = shadow.span();
+                heap.raw_uav_at(base + 1 + n as u32, &shadow.buffer, 0, len);
+            }
+            Held::Pool { buffer, len } => heap.raw_uav_at(base + 1 + n as u32, buffer, 0, *len),
+        }
     }
     m.heaps.insert(key, (base, m.copies.len() as u32));
     // Once per list, and for copies numbered since: the builder alone
@@ -436,7 +568,11 @@ pub(crate) fn ready(
     let first_read = list.first_use(READ);
     let first_write = writes && list.first_use(WRITE);
     let named_only = writes_named_only();
-    for (n, shadow) in m.copies.iter().enumerate() {
+    for (n, copy) in m.copies.iter().enumerate() {
+        // The page pool in place: no refresh, no copy back.
+        let Held::Shadow(shadow) = copy else {
+            continue;
+        };
         let (start, len) = shadow.span();
         if first_read || n >= numbered {
             shadow.refresh(list, start, len);

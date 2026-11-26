@@ -644,6 +644,7 @@ pub fn title_memory_remapped(at: usize, len: usize) {
     crate::descriptor::host::remapped(at, len);
     // The views the runtime told us of there are no longer what it shows.
     crate::inplace::views_gone(at, len);
+    crate::memory::pool_gone(at, len);
     // And nothing stays in place over it.
     crate::inplace::title_memory_freeing(at, len);
     let mut g = guards();

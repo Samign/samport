@@ -289,6 +289,53 @@ pub fn title_memory_section(section: usize, bytes: u64, committed: bool) {
 /// `offset` on. Call after [`crate::title_memory_remapped`] of the range.
 pub fn title_memory_view(at: usize, len: usize, section: usize, offset: u64) {
     views().views.insert(at, (len, section, offset));
+    // Title memory by address reaches the page pool in place (`VICTORY_POOL_IN_PLACE`).
+    crate::memory::pool_view(at, len);
+}
+
+/// The section and the offset in it that the page at `at` shows, if it is
+/// a view of a section made committed (one a heap can be opened on).
+pub(crate) fn committed_view_of(at: usize) -> Option<(usize, u64, u64)> {
+    let v = views();
+    let (&base, &(len, section, offset)) = v.views.range(..=at).next_back()?;
+    if at >= base + len {
+        return None;
+    }
+    let &(_, bytes, committed) = v.sections.iter().find(|s| s.0 == section)?;
+    committed.then_some((section, offset + (at - base) as u64, bytes))
+}
+
+/// Every view of a committed section now mapped: address and bytes.
+pub(crate) fn committed_views() -> Vec<(usize, usize)> {
+    let v = views();
+    v.views
+        .iter()
+        .filter(|(_, (_, section, _))| v.sections.iter().any(|s| s.0 == *section && s.2))
+        .map(|(&at, &(len, _, _))| (at, len))
+        .collect()
+}
+
+/// The heap opened on a committed section, opened on first use and kept
+/// for the run (the heap is the section, whatever views come and go).
+pub(crate) fn section_heap(section: usize) -> Option<ID3D12Heap> {
+    static HEAPS: Mutex<BTreeMap<usize, Option<ID3D12Heap>>> = Mutex::new(BTreeMap::new());
+    let mut heaps = HEAPS.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(h) = heaps.get(&section) {
+        return h.clone();
+    }
+    let host = crate::host::host()?;
+    let heap = match open(&host.device, From::Section(section)) {
+        Ok(h) => {
+            tracing::info!(section = format_args!("{section:#x}"), "the title's page pool opened as a heap: shaders reach it by address in place");
+            Some(h)
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "the title's page pool could not be opened as a heap: copies as before");
+            None
+        }
+    };
+    heaps.insert(section, heap.clone());
+    heap
 }
 
 /// What `[at, at + len)` showed is gone ([`crate::title_memory_remapped`]):
