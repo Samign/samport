@@ -231,8 +231,16 @@ static IDLE: std::sync::Mutex<(Vec<Idle>, u64)> = std::sync::Mutex::new((Vec::ne
 /// profile cpu-1), and the most upload memory they may keep
 /// between them (a list keeps scratch chunks over a reset only while lists
 /// do not share them, `VICTORY_SCRATCH_POOL=0`).
+/// `VICTORY_IDLE_LISTS` sets the count (512 unless set). Each host list
+/// and its prelude cost the PC 1.7 MB of memory on an RTX 3070 Ti's driver
+/// (7.9 GB grew while 2612 lists and 2141 preludes were made, 2127 lists
+/// alive), which a PC of 32 GB does not have to spare.
 #[cfg(windows)]
-const IDLE_MOST: (usize, u64) = (512, 256 << 20);
+fn idle_most() -> (usize, u64) {
+    static N: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    let n = *N.get_or_init(|| std::env::var("VICTORY_IDLE_LISTS").ok().and_then(|v| v.trim().parse().ok()).unwrap_or(512));
+    (n, 256 << 20)
+}
 
 /// Whether host lists that have run are used again (on by default;
 /// `VICTORY_LIST_POOL=0`: each is made new and thrown away, as before).
@@ -273,7 +281,7 @@ pub(crate) fn recycle(lists: Vec<Detached>, ran: &[usize]) {
         // The descriptor slots and the upload memory its commands named.
         drop(_state);
         drop(_uploads);
-        if !ran.contains(&i) || IDLE.lock().unwrap_or_else(|e| e.into_inner()).0.len() >= IDLE_MOST.0 {
+        if !ran.contains(&i) || IDLE.lock().unwrap_or_else(|e| e.into_inner()).0.len() >= idle_most().0 {
             continue;
         }
         // As the title's reset does: what the list kept for its commands
@@ -281,7 +289,7 @@ pub(crate) fn recycle(lists: Vec<Detached>, ran: &[usize]) {
         host.reset();
         let bytes = host.scratch_kept();
         let mut idle = IDLE.lock().unwrap_or_else(|e| e.into_inner());
-        if idle.0.len() < IDLE_MOST.0 && idle.1 + bytes <= IDLE_MOST.1 {
+        if idle.0.len() < idle_most().0 && idle.1 + bytes <= idle_most().1 {
             idle.0.push(Idle(host, bytes));
             idle.1 += bytes;
         }

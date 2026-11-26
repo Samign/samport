@@ -31,6 +31,11 @@ param(
 $defaults = @{
     VICTORY_MEMORY_CARD_MB = '1536'; VICTORY_TEXTURE_BUDGET_MB = '2560'
     VICTORY_DISPLAY_MODE = '1920x1080'; VICTORY_LEVELS_ON_DEMAND = '1'
+    # The PC's memory (32 GB): idle host lists kept at most 128 (each with its prelude costs
+    # about 1.7 MB on NVIDIA's driver; 2,127 were alive), and windows of the title's private
+    # memory placed in that memory instead of copied (no copy in the PC's memory, nothing to
+    # refresh or copy back; it helped on the earlier base).
+    VICTORY_IDLE_LISTS = '128'; VICTORY_INPLACE = '1'
 }
 foreach ($k in $defaults.Keys) { if (-not $More.ContainsKey($k)) { $More[$k] = $defaults[$k] } }
 $play = Join-Path (Split-Path -Parent $MyInvocation.MyCommand.Path) 'play.ps1'
@@ -45,7 +50,7 @@ $summary = $Log -replace '\.log$', '-summary.txt'
 $patterns = @(
     " fps, ", "structure builder", "does not translate", "host pipeline refused", "unhandled exception",
     "first-chance exception", "device removed", "memory allocation", "title memory by address:",
-    "MB private", "card's memory", "budget", "video memory as the system counts", "ERROR", "panicked", "without a host pipeline: ", "ambient"
+    "MB private", "what holds it", "memory map", "in place:", "card's memory", "budget", "video memory as the system counts", "ERROR", "panicked", "without a host pipeline: ", "ambient"
 ) -join "|"
 Select-String -Path $Log -Pattern $patterns | ForEach-Object { $_.Line.Trim() } | Select-Object -Unique | Set-Content $summary
 Get-Content $Log -Tail 3000 | Set-Content ($Log -replace '\.log$', '-tail.txt')
