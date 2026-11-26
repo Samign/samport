@@ -3178,6 +3178,7 @@ impl State {
             };
             if index >= host.count() {
                 fresh.push(u.slot);
+                FRESH_STATS[1].fetch_add(1, Ordering::Relaxed);
             }
         }
         fresh.sort_unstable();
@@ -3298,9 +3299,15 @@ impl State {
                 made.push((slot, first * 32));
                 continue;
             }
+            FRESH_STATS[0].fetch_add(1, Ordering::Relaxed);
+            FRESH_STATS[2].fetch_add(u64::from(n), Ordering::Relaxed);
+            FRESH_STATS[3].fetch_max(u64::from(n), Ordering::Relaxed);
+            say_fresh(host);
             let Some(first) = host.dynamic(n) else {
                 // No room: the draw must not run with the title's own
                 // offsets (slots never made for it); `bind` drops it.
+                FRESH_STATS[4].fetch_add(1, Ordering::Relaxed);
+                FRESH_STATS[5].fetch_add(u64::from(n), Ordering::Relaxed);
                 made.push((slot, u32::MAX));
                 continue;
             };
@@ -4468,4 +4475,37 @@ mod record_hash_tests {
         let zeros: Vec<u64> = (2..100).map(|n| of(&vec![[0; 3]; n])).collect();
         assert!(zeros.iter().all(|h| seen.insert(*h)));
     }
+}
+
+/// Fresh descriptor tables since the last line: made (asked for), whose
+/// title slots lie past a capped host heap, slots asked for, the largest,
+/// refused, slots refused.
+static FRESH_STATS: [AtomicU64; 6] = [const { AtomicU64::new(0) }; 6];
+
+/// Every five seconds: what fresh tables took of the dynamic slots, to size
+/// them on a host whose view heap is capped (NVIDIA: 1,000,000 views, of
+/// them 2^18 dynamic; 2,400 tables a frame refused on an RTX 3070 Ti).
+#[cfg(windows)]
+fn say_fresh(host: &crate::descriptor::host::HostHeap) {
+    static LAST: AtomicU64 = AtomicU64::new(0);
+    let now = crate::host::now_ms();
+    let last = LAST.load(Ordering::Relaxed);
+    if now < last + 5_000 || LAST.compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed).is_err() {
+        return;
+    }
+    let s: Vec<u64> = FRESH_STATS.iter().map(|x| x.swap(0, Ordering::Relaxed)).collect();
+    let (free, all) = host.dynamic_free();
+    tracing::info!(
+        "fresh descriptor tables in 5 s: {} asked ({} for title slots past the host heap), {} slots ({:.1} a table, the largest {}); {} refused ({} slots); dynamic slots free now {} of {}, title slots in the host heap {}",
+        s[0],
+        s[1],
+        s[2],
+        s[2] as f64 / s[0].max(1) as f64,
+        s[3],
+        s[4],
+        s[5],
+        free,
+        all,
+        host.count()
+    );
 }

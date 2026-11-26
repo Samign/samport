@@ -1853,6 +1853,11 @@ impl HostHeap {
         Some(self.count + first as u32)
     }
 
+    /// Dynamic slots free now, and all there are.
+    pub(crate) fn dynamic_free(&self) -> (u32, u32) {
+        (self.free.load(std::sync::atomic::Ordering::Relaxed), self.dynamic)
+    }
+
     /// The title slots this heap has host slots for; fewer than the title's
     /// when the host caps its size.
     pub(crate) fn count(&self) -> u32 {
