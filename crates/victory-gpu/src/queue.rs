@@ -845,6 +845,12 @@ fn system_timestamp() -> u64 {
 /// Frames presented so far.
 static FRAMES: AtomicU64 = AtomicU64::new(0);
 
+/// Frames presented so far (for ages of what is held).
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn frames_so_far() -> u64 {
+    FRAMES.load(Ordering::Relaxed)
+}
+
 #[cfg(feature = "diagnostics")]
 pub(crate) fn presented() -> u64 {
     FRAMES.load(Ordering::Relaxed)

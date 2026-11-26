@@ -162,6 +162,11 @@ pub(crate) struct HostHeap {
     /// Where the search for free dynamic slots starts, and which are taken
     /// (by lists not yet reset).
     next: Mutex<(u32, Vec<bool>)>,
+    /// The frame each run of dynamic slots was taken in, at its first slot
+    /// (diagnostics of how long lists hold them).
+    taken_at: Mutex<Vec<u32>>,
+    /// Dynamic slots held, by the frame they were taken in (modulo 64).
+    held_by_frame: [std::sync::atomic::AtomicU32; 64],
     /// How many dynamic slots are free (changed under `next`'s lock): with
     /// fewer than a table needs, the search is not made. Once the world
     /// had taken them all, every later table of the frame searched every
@@ -1701,6 +1706,8 @@ impl HostHeap {
             away: Mutex::default(),
             kept: (0..count + extra).map(|_| Mutex::new(None)).collect(),
             next: Mutex::new((0, vec![false; extra as usize])),
+            taken_at: Mutex::new(vec![0; extra as usize]),
+            held_by_frame: std::array::from_fn(|_| std::sync::atomic::AtomicU32::new(0)),
             free: std::sync::atomic::AtomicU32::new(extra),
             too_long: std::sync::atomic::AtomicU32::new(u32::MAX),
             strides,
@@ -1861,8 +1868,31 @@ impl HostHeap {
         crate::copystat::add(crate::copystat::C::DynamicNs, started.elapsed().as_nanos() as u64);
         taken[first..first + n].fill(true);
         self.free.fetch_sub(n as u32, std::sync::atomic::Ordering::Relaxed);
+        let frame = crate::queue::frames_so_far() as u32;
+        if let Some(at) = self.taken_at.lock().unwrap_or_else(|e| e.into_inner()).get_mut(first) {
+            *at = frame;
+        }
+        self.held_by_frame[frame as usize % 64].fetch_add(n as u32, std::sync::atomic::Ordering::Relaxed);
         *next = ((first + n) % end) as u32;
         Some(self.count + first as u32)
+    }
+
+    /// Dynamic slots held now by how many frames ago they were taken: this
+    /// frame, 1, 2, 3, 4 to 7, 8 to 15, 16 to 63.
+    pub(crate) fn dynamic_held_by_age(&self) -> [u32; 7] {
+        let now = crate::queue::frames_so_far() as u32;
+        let mut out = [0; 7];
+        for (f, held) in self.held_by_frame.iter().enumerate() {
+            let age = (now as usize % 64 + 64 - f) % 64;
+            let bucket = match age {
+                0..=3 => age,
+                4..=7 => 4,
+                8..=15 => 5,
+                _ => 6,
+            };
+            out[bucket] += held.load(std::sync::atomic::Ordering::Relaxed);
+        }
+        out
     }
 
     /// Dynamic slots free now, and all there are.
@@ -2728,6 +2758,12 @@ impl HostHeap {
         if let Some(slots) = guard.1.get_mut(at as usize..end) {
             let given = slots.iter().filter(|taken| **taken).count() as u32;
             self.free.fetch_add(given, std::sync::atomic::Ordering::Relaxed);
+            if given > 0
+                && let Some(&frame) = self.taken_at.lock().unwrap_or_else(|e| e.into_inner()).get(at as usize)
+            {
+                let held = &self.held_by_frame[frame as usize % 64];
+                let _ = held.fetch_update(std::sync::atomic::Ordering::Relaxed, std::sync::atomic::Ordering::Relaxed, |h| Some(h.saturating_sub(given)));
+            }
             self.too_long.store(u32::MAX, std::sync::atomic::Ordering::Relaxed);
             slots.fill(false);
         }

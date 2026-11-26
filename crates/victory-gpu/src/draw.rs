@@ -3324,6 +3324,11 @@ impl State {
                 // offsets (slots never made for it); `bind` drops it.
                 FRESH_STATS[4].fetch_add(1, Ordering::Relaxed);
                 FRESH_STATS[5].fetch_add(u64::from(n - lo), Ordering::Relaxed);
+                if entries().any(|u| u.kind == ResourceType::Cbv) {
+                    FRESH_STATS[6].fetch_add(1, Ordering::Relaxed);
+                }
+                FRESH_STATS[7].fetch_add(selected.len() as u64, Ordering::Relaxed);
+                FRESH_STATS[8].fetch_add(places.len() as u64, Ordering::Relaxed);
                 made.push((slot, u32::MAX));
                 continue;
             };
@@ -4499,7 +4504,7 @@ mod record_hash_tests {
 /// Fresh descriptor tables since the last line: made (asked for), whose
 /// title slots lie past a capped host heap, slots asked for, the largest,
 /// refused, slots refused.
-static FRESH_STATS: [AtomicU64; 6] = [const { AtomicU64::new(0) }; 6];
+static FRESH_STATS: [AtomicU64; 9] = [const { AtomicU64::new(0) }; 9];
 
 /// Every five seconds: what fresh tables took of the dynamic slots, to size
 /// them on a host whose view heap is capped (NVIDIA: 1,000,000 views, of
@@ -4514,6 +4519,18 @@ fn say_fresh(host: &crate::descriptor::host::HostHeap) {
     }
     let s: Vec<u64> = FRESH_STATS.iter().map(|x| x.swap(0, Ordering::Relaxed)).collect();
     let (free, all) = host.dynamic_free();
+    let age = host.dynamic_held_by_age();
+    tracing::info!(
+        "refused fresh tables: {} of {} hold a constant buffer (the rest reach past the host heap); they name {:.1} entries and pick {:.1} views by index on average",
+        s[6],
+        s[4],
+        s[8] as f64 / s[4].max(1) as f64,
+        s[7] as f64 / s[4].max(1) as f64
+    );
+    tracing::info!(
+        "dynamic slots held by age in frames: this one {}, 1 ago {}, 2 ago {}, 3 ago {}, 4-7 ago {}, 8-15 ago {}, 16+ ago {}",
+        age[0], age[1], age[2], age[3], age[4], age[5], age[6]
+    );
     tracing::info!(
         "fresh descriptor tables in 5 s: {} asked ({} for title slots past the host heap), {} slots ({:.1} a table, the largest {}); {} refused ({} slots); dynamic slots free now {} of {}, title slots in the host heap {}",
         s[0],
